@@ -1,0 +1,87 @@
+let checks = 0;
+function check(ok: unknown, name: string): void { checks++; if (!ok) throw new Error(name); }
+function rejects(f: () => unknown, name: string): void {
+  let failed = false; try { f(); } catch { failed = true; } check(failed, name);
+}
+const config: ScenarioConfig = scenario;
+const wikiBinding = config.bindings.find(b => b.id === "wiki");
+if (!wikiBinding || wikiBinding.capability !== "processor") throw new Error("fixture wiki");
+const selector = wikiBinding.inputs[0].selector;
+if (selector.kind !== "output-set") throw new Error("actual scenario still uses path");
+const file = (id: string, rev: string, path: string, collection: Collection = "derived"): FormalFile =>
+  ({fileId:id,revisionId:rev,contentHash:rev.padEnd(64,"0"),logicalPath:path,collection,freshness:"fresh",tombstone:false});
+const prd = file("f-prd", "1", "derived/spec/PRD.md"), design = file("f-design", "2", "derived/spec/TECHNICAL_DESIGN.md");
+const initial: FormalSnapshot = {files:{"f-prd":prd,"f-design":design},
+  sets:[{bindingId:"spec",setKey:"main",slots:{prd:"f-prd",design:"f-design"}}]};
+const allow = () => true;
+check(selectFormal(selector,initial,allow).length === 2,"original two outputs");
+const human = {...prd,revisionId:"3",contentHash:"3".repeat(64),logicalPath:"authored/spec/PRD.md",collection:"authored" as const};
+const promoted = {...initial,files:{...initial.files,"f-prd":human}};
+const selected = selectFormal(selector,promoted,allow);
+check(selected[0].fileId === prd.fileId && selected[0].revisionId === "3" && selected[0].collection === "authored","promotion follows stable slot");
+check(selected[1].fileId === design.fileId,"design retained");
+check(selectFormal(selector,initial,allow)[0].revisionId === "1","historical snapshot unaffected");
+rejects(()=>selectFormal(selector,promoted,f=>f.fileId !== "f-prd"),"promotion never grants access");
+rejects(()=>selectFormal(selector,{...promoted,files:{...promoted.files,"f-prd":{...human,freshness:"stale"}}},allow),"unreviewed human waits");
+rejects(()=>selectFormal({...selector,slots:["missing"]},promoted,allow),"missing required slot blocked");
+const replacement = file("f-correction", "4", "authored/correction.md", "authored");
+const relationSnapshot = {...initial,files:{...initial.files,[replacement.fileId]:replacement}};
+const relation: Correction = {id:"relation-1",version:"1",scope:config.scope,kind:"corrects",state:"active",target:prd,replacement,reason:"3 not 30"};
+check(correctionApplies(relation,config.scope,relationSnapshot,allow),"correction applies exact refs");
+check(!correctionApplies(relation,{...config.scope,projectId:"other"},relationSnapshot,allow),"cross project rejected");
+check(!correctionApplies(relation,config.scope,{...relationSnapshot,files:{...relationSnapshot.files,[prd.fileId]:human}},allow),"updated target never inherits");
+for (const id of [prd.fileId,replacement.fileId]) {
+  check(!correctionApplies(relation,config.scope,relationSnapshot,f=>f.fileId !== id),"either endpoint revoked");
+  for (const freshness of ["stale","invalid"] as const) {
+    check(!correctionApplies(relation,config.scope,{...relationSnapshot,files:{...relationSnapshot.files,[id]:{...relationSnapshot.files[id],freshness}}},allow),"either endpoint obsolete");
+  }
+}
+const withdrawn = withdrawRelation(relation,"1");
+check(withdrawn.state === "withdrawn" && withdrawn.version === "2","withdraw CAS version");
+check(!correctionApplies(withdrawn,config.scope,relationSnapshot,allow),"withdraw ends priority");
+check(sameRef(withdrawn.target,relation.target) && sameRef(withdrawn.replacement,relation.replacement),"withdraw preserves files");
+rejects(()=>withdrawRelation(withdrawn,"1"),"stale relation CAS refused");
+check(relationConflict({...relation,id:"concurrent"},[relation]),"same target conflict");
+check(relationConflict({...relation,id:"chain",target:replacement,replacement:design},[relation]),"chain rejected");
+check(relationConflict({...relation,id:"self",replacement:prd},[]),"self relation rejected");
+check(!relationConflict({...relation,id:"another",scope:{...config.scope,projectId:"other"}},[relation]),"different project independent");
+check(correctionGroup(relation).relatedRole === "original-evidence","corrects presentation");
+check(correctionGroup({...relation,kind:"supersedes"}).relatedRole === "superseded-evidence","supersedes presentation");
+let truthRows=0;
+for (const authorized of [false,true]) for (const tombstone of [false,true])
+  for (const freshness of ["fresh","stale","invalid"] as const)
+    for (const policy of ["current_only","include_stale"] as const) for (const allowDegraded of [false,true]) {
+      const result = admitContent({...prd,tombstone,freshness},authorized,policy);
+      const expected = authorized && !tombstone && (freshness === "fresh" || freshness === "stale" && policy === "include_stale");
+      check(result === expected,`freshness/ACL truth row ${truthRows} degraded=${allowDegraded}`);truthRows++;
+    }
+const embed1 = config.instances.find(i=>i.ref==="embed@1")!;
+check(instanceCheck(config,embed1,"embedding",true)==="PERMISSION_DENIED","disabled embedding fails permission");
+const newConfig=embeddingReplacement(config), embed2=newConfig.instances.find(i=>i.ref==="embed@2")!;
+check(instanceCheck(newConfig,embed2,"embedding",true)===null,"approved embedding candidate");
+check(config.retrieval.embedding===null && newConfig.retrieval.embedding==="embed@2","swap not in-place");
+check(embed1.config.dimensions===8 && embed2.config.dimensions===16,"dimension generation split");
+check(instanceCheck(newConfig,{...embed2,config:{...embed2.config,endpoint:"https://unapproved.example.invalid"}},"embedding",true)==="PERMISSION_DENIED","endpoint cannot expand grant");
+check(instanceCheck(newConfig,{...embed2,config:{...embed2.config,secretRef:"secret:other"}},"embedding",true)==="PERMISSION_DENIED","secret cannot expand grant");
+check(instanceCheck(newConfig,embed2,"embedding",false)==="ISOLATION_REQUIRED","no sandbox no job");
+const retriever=config.instances.find(i=>i.ref==="retrieve@1")!;
+check(instanceCheck(config,{...retriever,execution:{...retriever.execution,location:"local"}},"retriever",true)==="CAPABILITY_OR_LOCATION_MISMATCH","retriever invalid location refused");
+check(instanceCheck({...newConfig,grants:{...newConfig.grants,"embedding-approved":{...newConfig.grants["embedding-approved"],secretRefs:[]}}},embed2,"embedding",true)==="PERMISSION_DENIED","current revoke beats lock");
+for (const generateWiki of [false,true]) {
+  const preset = compileRepoWiki(config,{preset:"official.repo-wiki@1",sourceInstance:"repo@1",processorInstance:"local-codex@1",generateWiki});
+  check(preset.bindings.length===2,"two-step official preset");
+  check(preset.bindings[0].enabled && preset.bindings[1].enabled===generateWiki,"raw-only first success available");
+  for (const b of preset.bindings) {
+    const instance = preset.instances.find(i=>i.ref===b.instanceRef);
+    check(!!instance && instanceCheck(preset,instance,b.capability,true)===null,"preset instance matches capability");
+    check(preset.instances.some(i=>i.ref===b.trigger.instanceRef),"preset trigger exists");
+  }
+}
+// Type failures are expected constraints, not app behavior tests.
+// @ts-expect-error Binding may not override instance execution.
+const duplicateAuthority: Binding = {...config.bindings[0], placement: embed1.execution};
+// @ts-expect-error Partial output sets cannot publish.
+const partialOutput: OutputSetManifest = {...wikiFull, complete:false};
+// @ts-expect-error full desired cannot contain delete.
+const deleteInFull: OutputSetManifest = {...wikiFull, mode:"full", desired:[{op:"delete",slotKey:"index",base:{fileId:"f",revisionId:"r"},reason:"x"}]};
+console.log(JSON.stringify({checks,truthRows,selectors:"promotion/history/access/required-slot",corrections:"scope/revision/conflict/withdraw/access",instances:"swap/lock/permissions/location/isolation",preset:"raw-only/worker"}));

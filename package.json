@@ -1,0 +1,38 @@
+{
+  "name": "opencontext",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.19.0 <25",
+    "pnpm": "11.19.0"
+  },
+  "scripts": {
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm check:docs && pnpm check:boundaries && pnpm check:skills && pnpm check:safety && pnpm test:harness && pnpm test:app && pnpm build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "check:docs": "node scripts/check-docs.ts",
+    "check:boundaries": "node scripts/check-boundaries.ts",
+    "check:skills": "node scripts/check-skills.ts",
+    "sync:skills": "node scripts/check-skills.ts --write",
+    "check:safety": "node scripts/check-safety.ts",
+    "test:harness": "node --test tests/harness/*.test.ts",
+    "test:app": "vitest run",
+    "build": "pnpm --filter @opencontext/web build",
+    "dev": "node apps/server/src/main.ts --demo",
+    "start": "node apps/server/src/main.ts",
+    "dev:web": "pnpm --filter @opencontext/web dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.0",
+    "eslint": "10.11.0",
+    "prettier": "3.9.9",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0",
+    "yaml": "2.9.1",
+    "vitest": "5.0.2"
+  }
+}

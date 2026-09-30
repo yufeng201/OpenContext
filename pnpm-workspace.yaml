@@ -1,0 +1,10 @@
+packages:
+  - apps/*
+  - packages/*
+  - plugins/*
+engineStrict: true
+saveExact: true
+ignoreScripts: true
+storeDir: .cache/pnpm/store
+cacheDir: .cache/pnpm/cache
+enableGlobalVirtualStore: false

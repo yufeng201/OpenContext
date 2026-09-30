@@ -1,0 +1,21 @@
+{
+  "name": "@opencontext/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "fastify": "5.12.5",
+    "@opencontext/contracts": "workspace:*",
+    "@opencontext/plugin-sdk": "workspace:*",
+    "@opencontext/core": "workspace:*",
+    "@opencontext/storage-fs": "workspace:*",
+    "@opencontext/state-sqlite": "workspace:*",
+    "@opencontext/retrieval": "workspace:*",
+    "@opencontext/mcp": "workspace:*",
+    "@opencontext/repo-connector": "workspace:*",
+    "@opencontext/markdown-processor": "workspace:*"
+  }
+}

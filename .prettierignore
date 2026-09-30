@@ -1,0 +1,13 @@
+node_modules
+.cache
+dist
+coverage
+pnpm-lock.yaml
+README.md
+docs/PRD.md
+docs/TECHNICAL_DESIGN.md
+docs/IMPLEMENTATION_BLUEPRINT.md
+docs/USER_JOURNEYS.md
+docs/checkpoint
+docs/original-2026-09-30
+tests/design/*.txt

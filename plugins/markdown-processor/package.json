@@ -1,0 +1,11 @@
+{
+  "name": "@opencontext/markdown-processor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@opencontext/contracts": "workspace:*",
+    "@opencontext/plugin-sdk": "workspace:*"
+  }
+}
