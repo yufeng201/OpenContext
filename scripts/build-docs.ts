@@ -10,6 +10,7 @@ const pages = [
   ['feishu', '飞书支持等级', 'FEISHU_CHAT.md'],
   ['plugins', '插件开发', 'PLUGIN_DEVELOPMENT.md'],
   ['operations', '运维与安全', 'OPERATIONS.md'],
+  ['backup-recovery', '备份恢复与诊断', 'BACKUP_RECOVERY.md'],
   ['readiness', '产品就绪矩阵', 'PRODUCT_READINESS.md'],
 ] as const;
 const output = resolve('apps/docs/dist');

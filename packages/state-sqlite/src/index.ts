@@ -165,6 +165,15 @@ export class Catalog {
           "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
         )
         .all();
+      const savedVersion = tables.some((table) => table.name === 'catalog_meta')
+        ? this.db
+            .prepare(
+              "SELECT value FROM catalog_meta WHERE key='storage_version'",
+            )
+            .get()?.value
+        : undefined;
+      if (savedVersion !== undefined && savedVersion !== '1')
+        throw new Error('SCHEMA_UNSUPPORTED');
       const savedMode = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
             .prepare(
@@ -288,6 +297,11 @@ export class Catalog {
             'ALTER TABLE runs ADD COLUMN execution_json TEXT CHECK(execution_json IS NULL OR json_valid(execution_json))',
           );
         }
+        this.db
+          .prepare(
+            "INSERT INTO catalog_meta(key,value) VALUES('storage_version','1') ON CONFLICT(key) DO NOTHING",
+          )
+          .run();
         this.rejectLegacyRuns();
         this.db
           .prepare(

@@ -7,14 +7,14 @@ async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   if (command === 'help' || command === '--help' || !command) {
     console.log(
-      'OpenContext query CLI (local preview)\nEnvironment: OPENCONTEXT_URL (default http://127.0.0.1:4310), OPENCONTEXT_QUERY_TOKEN\nCommands: projects | tree PROJECT | search PROJECT QUERY [fts|grep] | read PROJECT FILE REVISION\nOutput: JSON; fixed revision required for read. No mutation, config writes or token flags.',
+      'OpenContext query CLI (local preview)\nEnvironment: OPENCONTEXT_URL (default http://127.0.0.1:4310), OPENCONTEXT_QUERY_TOKEN\nCommands: readiness (owner only) | projects | tree PROJECT | search PROJECT QUERY [fts|grep] | read PROJECT FILE REVISION\nOutput: JSON; fixed revision required for read. No mutation, config writes or token flags.',
     );
     return;
   }
-  if (!['projects', 'tree', 'search', 'read'].includes(command))
+  if (!['readiness', 'projects', 'tree', 'search', 'read'].includes(command))
     throw new Error('UNKNOWN_COMMAND');
   if (
-    (command === 'projects' && args.length !== 0) ||
+    (['readiness', 'projects'].includes(command) && args.length !== 0) ||
     (command === 'tree' && args.length !== 1) ||
     (command === 'search' && (args.length < 2 || args.length > 3)) ||
     (command === 'read' && args.length !== 3)
@@ -28,7 +28,11 @@ async function main(): Promise<void> {
   });
   const project = args[0]!;
   let result: unknown;
-  if (command === 'projects') result = await client.projects();
+  if (command === 'readiness') {
+    const report = await client.readiness();
+    result = report;
+    if (!report.ready) process.exitCode = 1;
+  } else if (command === 'projects') result = await client.projects();
   else if (command === 'tree') result = await client.tree(project);
   else if (command === 'read')
     result = await client.read(project, args[1]!, args[2]!);

@@ -1,4 +1,8 @@
 import {
+  parseReadinessReport,
+  type ReadinessReport,
+} from '@opencontext/contracts/maintenance';
+import {
   QueryRoutes,
   projectQueryPath,
 } from '@opencontext/contracts/query-api';
@@ -53,7 +57,11 @@ export class OpenContextClient {
     this.token = options.token;
     this.transport = options.fetch ?? fetch;
   }
-  private async request<T>(path: string, body?: SearchInput): Promise<T> {
+  private async request<T>(
+    path: string,
+    body?: SearchInput,
+    diagnosticStatus?: number,
+  ): Promise<T> {
     const response = await this.transport(this.base + path, {
       method: body ? 'POST' : 'GET',
       headers: {
@@ -65,7 +73,7 @@ export class OpenContextClient {
       credentials: 'omit',
       signal: AbortSignal.timeout(15_000),
     });
-    if (!response.ok) {
+    if (!response.ok && response.status !== diagnosticStatus) {
       let code = 'HTTP_ERROR',
         correlationId: string | undefined;
       try {
@@ -90,6 +98,18 @@ export class OpenContextClient {
       throw new OpenContextError(response.status, code, correlationId);
     }
     return (await response.json()) as T;
+  }
+  async readiness(): Promise<ReadinessReport> {
+    const result = await this.request<unknown>(
+      '/api/readiness',
+      undefined,
+      503,
+    );
+    try {
+      return parseReadinessReport(result);
+    } catch {
+      throw new OpenContextError(502, 'INVALID_READINESS_RESPONSE');
+    }
   }
   projects(): Promise<Project[]> {
     return this.request(QueryRoutes.projects);

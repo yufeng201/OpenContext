@@ -14,6 +14,7 @@ REST使用Authorization Bearer。树只包含当前有效文件；read必须给�
 
 ```sh
 pnpm cli --help
+pnpm cli readiness
 pnpm cli projects
 pnpm cli tree PROJECT_ID
 pnpm cli search PROJECT_ID OpenContext grep
@@ -26,7 +27,7 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 `packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是仓库内私有源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect并限时15秒，以免Bearer跟随跳转。
 
-方法：projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。响应类型目前是TS契约断言，尚无客户端运行时response schema校验。Python SDK后续从同一API契约实现，当前未提供。
+方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。查询正文响应目前是TS契约断言，尚无客户端运行时response schema校验；readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 
 可执行合成示例及REST/SDK/MCP一致性、跨project/历史/revoke测试在tests/integration/query-access.test.ts；它们不调用模型。
 
@@ -40,4 +41,4 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 401 UNAUTHORIZED：token缺失/撤销。403 FORBIDDEN：reader访问其他project或写入口。404 NOT_FOUND：文件/revision不可见，或binding已撤销。400 INVALID_SCHEMA：请求字段/类型不符合共享schema。SDK/CLI不自动扩大scope、重新认证、降级成owner或改读head。索引freshness不是授权依据。
 
-health只代表存活，尚无完整readiness审计；重启、备份、迁移和安全门槛见[产品就绪矩阵](PRODUCT_READINESS.md)。当前不支持多租户企业生产部署。
+health只代表存活；owner-only readiness检查依赖并在503时输出脱敏JSON、CLI非零退出。离线维护见[备份恢复与诊断](BACKUP_RECOVERY.md)；重启、备份、迁移和安全门槛见[产品就绪矩阵](PRODUCT_READINESS.md)。当前不支持多租户企业生产部署。

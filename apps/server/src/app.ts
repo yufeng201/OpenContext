@@ -1,3 +1,8 @@
+import { parseReadinessReport } from '@opencontext/contracts/maintenance';
+import {
+  assertCompleteRoot,
+  inspectStorage,
+} from '@opencontext/state-sqlite/maintenance';
 import { QueryRoutes, QueryOpenApi } from '@opencontext/contracts/query-api';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
@@ -50,6 +55,7 @@ export function createApplication(options: ApplicationOptions) {
   if (options.ownerToken.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
   if (options.ownerToken.length > MAX_AUTH_TOKEN_LENGTH)
     throw new Error('OWNER_TOKEN_TOO_LONG');
+  assertCompleteRoot(options.dataRoot);
   const registry =
     options.registry ?? createDefaultRegistry(options.dataRoot, options.feishu);
   mkdirSync(options.dataRoot, { recursive: true, mode: 0o700 });
@@ -76,6 +82,8 @@ export function createApplication(options: ApplicationOptions) {
     logger: false,
     bodyLimit: 65_536,
     trustProxy: false,
+    genReqId: () => randomUUID(),
+    requestIdHeader: false,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   const currentCredentials = new WeakMap<Principal, string>();
@@ -253,7 +261,11 @@ export function createApplication(options: ApplicationOptions) {
       return done(new Error('UNTRUSTED_ORIGIN'));
     done();
   });
-  app.setErrorHandler((error, _request, reply) => {
+  app.addHook('onSend', (request, reply, _payload, done) => {
+    reply.header('X-Request-Id', request.id);
+    done();
+  });
+  app.setErrorHandler((error, request, reply) => {
     const message = error instanceof Error ? error.message : '';
     const frameworkCode =
       error && typeof error === 'object' && 'code' in error ? error.code : null;
@@ -311,12 +323,30 @@ export function createApplication(options: ApplicationOptions) {
         code,
         message:
           code === 'INTERNAL_ERROR' ? 'Request could not be completed' : code,
-        correlationId: randomUUID(),
+        correlationId: request.id,
       },
     });
   });
   app.get('/api/openapi.json', () => QueryOpenApi);
   app.get('/api/health', () => ({ status: 'ok', schemaVersion: 1 }));
+  app.get('/api/readiness', (request, reply) => {
+    authorize(authenticate(request), undefined, true);
+    const result = inspectStorage(options.dataRoot, catalog.db);
+    if (coordinator.lastIndexError) {
+      result.checks.index = { ok: false, code: 'INDEX_REBUILD_FAILED' };
+      result.ready = false;
+    }
+    if (coordinator.lastWorkerError) result.ready = false;
+    reply.code(result.ready ? 200 : 503);
+    return parseReadinessReport({
+      ...result,
+      requestId: request.id,
+      scheduler: {
+        ok: coordinator.lastWorkerError === null,
+        code: coordinator.lastWorkerError ? 'SCHEDULER_FAILED' : 'OK',
+      },
+    });
+  });
   app.post<{ Body: { token: string } }>(
     '/api/session',
     { schema: { body: LoginSchema } },
