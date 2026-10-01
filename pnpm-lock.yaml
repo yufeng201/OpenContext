@@ -160,6 +160,12 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
+  packages/http-client:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/mcp:
     dependencies:
       '@modelcontextprotocol/sdk':

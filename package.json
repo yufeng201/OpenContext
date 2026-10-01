@@ -8,7 +8,7 @@
     "pnpm": "11.19.0"
   },
   "scripts": {
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm check:docs && pnpm check:boundaries && pnpm check:skills && pnpm check:safety && pnpm test:harness && pnpm test:app && pnpm build",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm check:docs && pnpm check:boundaries && pnpm check:skills && pnpm check:safety && pnpm test:harness && pnpm test:app && pnpm build && pnpm docs:build",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint . --max-warnings 0",
@@ -23,7 +23,10 @@
     "build": "pnpm --filter @opencontext/web build",
     "dev": "node apps/server/src/main.ts --demo",
     "start": "node apps/server/src/main.ts",
-    "dev:web": "pnpm --filter @opencontext/web dev"
+    "dev:web": "pnpm --filter @opencontext/web dev",
+    "cli": "node scripts/opencontext.ts",
+    "docs:build": "node scripts/build-docs.ts",
+    "docs:preview": "node scripts/preview-docs.ts"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",

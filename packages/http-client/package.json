@@ -1,0 +1,12 @@
+{
+  "name": "@opencontext/http-client",
+  "version": "0.1.0-preview",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@opencontext/contracts": "workspace:*"
+  }
+}

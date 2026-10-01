@@ -1,3 +1,4 @@
+import { QueryRoutes, QueryOpenApi } from '@opencontext/contracts/query-api';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -314,6 +315,7 @@ export function createApplication(options: ApplicationOptions) {
       },
     });
   });
+  app.get('/api/openapi.json', () => QueryOpenApi);
   app.get('/api/health', () => ({ status: 'ok', schemaVersion: 1 }));
   app.post<{ Body: { token: string } }>(
     '/api/session',
@@ -341,11 +343,11 @@ export function createApplication(options: ApplicationOptions) {
     );
     return { ok: true };
   });
-  app.get('/api/projects', (request) =>
+  app.get(QueryRoutes.projects, (request) =>
     services.projects(authenticate(request)),
   );
   app.post<{ Body: { name: string } }>(
-    '/api/projects',
+    QueryRoutes.projects,
     { schema: { body: CreateProjectSchema } },
     (request) => {
       authorize(authenticate(request), undefined, true);
@@ -515,11 +517,11 @@ export function createApplication(options: ApplicationOptions) {
           catalog.getBinding(run.bindingId)?.active,
       );
   });
-  app.get<{ Params: ProjectParams }>('/api/projects/:id/tree', (request) =>
+  app.get<{ Params: ProjectParams }>(QueryRoutes.tree, (request) =>
     services.tree(authenticate(request), request.params.id),
   );
   app.post<{ Params: ProjectParams; Body: SearchInput }>(
-    '/api/projects/:id/search',
+    QueryRoutes.search,
     { schema: { body: SearchSchema } },
     (request) =>
       services.search(authenticate(request), request.params.id, request.body),
@@ -527,16 +529,13 @@ export function createApplication(options: ApplicationOptions) {
   app.get<{
     Params: ProjectParams;
     Querystring: { fileId: string; revisionId: string };
-  }>(
-    '/api/projects/:id/read',
-    { schema: { querystring: ReadSchema } },
-    (request) =>
-      services.read(
-        authenticate(request),
-        request.params.id,
-        request.query.fileId,
-        request.query.revisionId,
-      ),
+  }>(QueryRoutes.read, { schema: { querystring: ReadSchema } }, (request) =>
+    services.read(
+      authenticate(request),
+      request.params.id,
+      request.query.fileId,
+      request.query.revisionId,
+    ),
   );
   app.post<{ Params: ProjectParams }>('/api/projects/:id/tokens', (request) => {
     authorize(authenticate(request), request.params.id, true);

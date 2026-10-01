@@ -35,3 +35,5 @@ PRD AC-01–AC-22、用户流程 UJ-01–UJ-13 仍是待实现的应用验收。
 历史原稿与 checkpoint 仅留工作区，未改字节；公开源码不依赖私有归档或临时验收材料。源码以 Git 提交为准，设计阅读包与早期 harness 检查点不能替代当前实现。项目许可证与账户权限未在本轮变更。
 
 企业与接入成熟度、缺口及下一阶段验收见 [产品就绪矩阵](PRODUCT_READINESS.md)。当前仅为受控开发预览。
+
+新增：[查询接入](QUERY_ACCESS.md)、[核心概念](CORE_CONCEPTS.md)、[当前运维边界](OPERATIONS.md)。本地文档站使用`pnpm docs:build`/`pnpm docs:preview`，复用这些指南，不公开发布。

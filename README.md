@@ -55,3 +55,7 @@ MCP 的官方协议客户端和真实 Codex 客户端显式 RPC 传输已验证�
 完整恢复需要内容文件、控制数据库和飞书已确认游标引用的 plugin-state 一起备份；只复制导出正文不能恢复授权、当前版本和任务。当前还没有生产备份/恢复工具。凭据、运行数据、缓存和临时验收材料不要提交到 Git。
 
 企业与接入成熟度、缺口及下一阶段验收见 [产品就绪矩阵](docs/PRODUCT_READINESS.md)。当前仅为受控开发预览。
+
+## 本地查询接入与文档站（源码预览）
+
+查询路径与TypeBox请求契约共用；`/api/openapi.json`是查询子集，源码TS SDK和只读CLI不存token。详见[查询接入](docs/QUERY_ACCESS.md)。`pnpm docs:build`生成8页静态文档、OpenAPI和llms.txt；`pnpm docs:preview`仅在本机4400预览。没有发布npm/PyPI或公开部署网站。生产备份/恢复、完整响应schema及真实Agent E2E仍是缺口。
