@@ -162,6 +162,10 @@ it('invalid port and credential-bearing proxy origin fail without creating priva
   for (const configuration of [
     { PORT: 'not-a-port' },
     {
+      NODE_ENV: 'production',
+      OPENCONTEXT_TEST_REPO_ROOT: '/synthetic-only-test-root',
+    },
+    {
       OPENCONTEXT_PUBLIC_ORIGIN:
         'https://user:PRIVATE_ORIGIN_SECRET@context.example.invalid',
     },

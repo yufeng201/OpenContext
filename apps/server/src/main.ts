@@ -22,6 +22,8 @@ async function main(): Promise<void> {
     process.env['OPENCONTEXT_DATA_ROOT'] ?? (demo ? 'runtime-demo' : 'runtime'),
   );
   const localRoot = process.env['OPENCONTEXT_TEST_REPO_ROOT'];
+  if (process.env['NODE_ENV'] === 'production' && localRoot !== undefined)
+    throw new Error('TEST_CONFIGURATION_DENIED');
   const port = parsePort(process.env['PORT'] ?? '4310');
   const publicOrigin = process.env['OPENCONTEXT_PUBLIC_ORIGIN'];
   if (publicOrigin) parsePublicOrigin(publicOrigin);

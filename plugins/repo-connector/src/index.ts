@@ -1,3 +1,8 @@
+import {
+  resolvePublicTarget,
+  gitPin,
+  publicUrl,
+} from '@opencontext/plugin-sdk/egress';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import { isIP } from 'node:net';
@@ -73,6 +78,16 @@ function fixedGitArgs(local: boolean): string[] {
     '-c',
     'http.followRedirects=false',
     '-c',
+    'http.proxy=',
+    '-c',
+    'http.sslVerify=true',
+    '-c',
+    'http.maxRequests=1',
+    '-c',
+    'http.maxRetries=0',
+    '-c',
+    'fetch.uriprotocols=',
+    '-c',
     'fetch.recurseSubmodules=false',
   ];
 }
@@ -89,6 +104,7 @@ async function git(
   deadline: number,
   local: boolean,
   maxOutput = MAX_TREE_BYTES,
+  networkArgs: string[] = [],
 ): Promise<Buffer> {
   aborted(context.signal);
   const remaining = deadline - Date.now();
@@ -98,13 +114,17 @@ async function git(
       'Git snapshot exceeded its time budget',
     );
   return new Promise<Buffer>((resolve, reject) => {
-    const child = spawn('git', [...fixedGitArgs(local), ...args], {
-      cwd,
-      shell: false,
-      env: gitEnvironment(),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    });
+    const child = spawn(
+      'git',
+      [...fixedGitArgs(local), ...networkArgs, ...args],
+      {
+        cwd,
+        shell: false,
+        env: gitEnvironment(),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      },
+    );
     const output: Buffer[] = [];
     let bytes = 0;
     let failure: RepoConnectorError | undefined;
@@ -236,6 +256,14 @@ export async function resolveSource(
     throw new RepoConnectorError(
       'INVALID_SOURCE',
       'A public HTTPS hostname is required',
+    );
+  }
+  try {
+    publicUrl(url);
+  } catch {
+    throw new RepoConnectorError(
+      'INVALID_SOURCE',
+      'Public HTTPS port443 hostname required',
     );
   }
   return { source: url.href, local: false };
@@ -375,15 +403,19 @@ export const repoConnector: OfficialPlugin<ConnectorInput, ConnectorOutput> = {
         'Invalid branch, previous SHA or snapshot limits',
       );
     }
+    const deadline = Date.now() + DEADLINE_MS;
     const { source, local } = await resolveSource(
       input.repoUrl,
       context.allowedLocalRepoRoot,
     );
+    const target = local
+      ? undefined
+      : await resolvePublicTarget(source, { signal: context.signal });
+    const networkArgs = target ? gitPin(target.url, target.addresses[0]!) : [];
     await mkdir(context.workDir, { recursive: true });
     const scratch = await mkdtemp(join(context.workDir, 'repo-sync-'));
-    const deadline = Date.now() + DEADLINE_MS;
     const run = (args: string[], maxOutput?: number): Promise<Buffer> =>
-      git(args, scratch, context, deadline, local, maxOutput);
+      git(args, scratch, context, deadline, local, maxOutput, networkArgs);
     try {
       await mkdir(join(scratch, 'empty-template'));
       await run(['init', '--bare', '--template=empty-template', 'objects.git']);
@@ -529,7 +561,10 @@ export const repoConnector: OfficialPlugin<ConnectorInput, ConnectorOutput> = {
 export const repoDefinition: ConnectorDefinition = {
   manifest: repoConnector.manifest,
   capability: 'connector',
-  artifactPaths: [import.meta.url],
+  artifactPaths: [
+    import.meta.url,
+    new URL('../../../packages/plugin-sdk/src/egress.ts', import.meta.url).href,
+  ],
   title: 'Git 仓库',
   description: 'Import one public HTTPS branch as a supported text snapshot.',
   configSchema: Type.Object(

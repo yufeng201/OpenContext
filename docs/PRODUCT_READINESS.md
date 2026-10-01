@@ -20,11 +20,11 @@
 | 密钥管理              | startup模式隔离；reader token摘要存储；飞书server secretRef，Web不输入秘密                                                                      | KMS/轮换/审批/多租户密钥隔离；P0                                                       | 撤销与模式拒绝；未来轮换/不可逆存储/日志扫描                    |
 | 来源撤权              | binding revoke后源与派生不可读；MCP/历史read和索引测试；Web轮询清理                                                                             | 上游权限变更无通用持续发现；不能收回已复制字节；P0                                     | 源撤权与已打开固定版本、stale search、跨空间测试                |
 | 保留/删除             | source同步完整删除、导入删除、tombstone与历史引用语义明确                                                                                       | TTL/法规删除/物理清除和备份删除策略；P0                                                | 删除不泄漏检索；未来保留/擦除/备份策略测试                      |
-| 审计                  | durable任务/来源状态、commit/固定引用；跨REST/MCP/任务公开错误码白名单和脱敏回归；不是完整安全审计                                              | 操作者审计、不可篡改存储/导出、保留和告警；P0                                          | 请求→操作者→决策→对象记录，敏感值脱敏与不可篡改验证             |
+| 审计                  | durable任务/来源状态、commit/固定引用；有界结构化主体/动作/目标/request-job审计、owner导出/敏感值排除；非防篡改                                 | 真实操作者、事务outbox、独立防篡改sink/告警、完整擦除保留；P0                          | 请求→操作者→决策→对象记录，敏感值脱敏与不可篡改验证             |
 | 插件开发              | 静态可信registry、JSON Schema、实例/包digest锁、host输出门禁；通用binding集成                                                                   | 动态安装/签名/依赖闭包、第三方隔离/沙箱不存在；P0/P2                                   | 参考PLUGIN_DEVELOPMENT；漂移、越界、部分输出、撤权拒绝          |
-| Git路径/网络安全      | 仅公开HTTPS与显式测试root；拒绝越界路径、symlink/binary/LFS；有限时间/输出预算；静态资产链接/8MiB拒绝                                           | 无OS/网络沙箱、DNS重绑定防护、pack磁盘配额；P0                                         | 当前拒绝fixtures；未来网络策略/资源配额与攻击测试               |
+| Git路径/网络安全      | HTTPS公共域名443、DNS全部答案拒私网/元数据、连接pin与0重定向；production禁测试root；路径/字节/时间预算                                          | 应用pin未证明完整DNS rebinding隔离；无OS全出站沙箱/pack配额；P0                        | 当前拒绝fixtures；未来网络策略/资源配额与攻击测试               |
 | Web可用性             | 目录树/面包屑/筛选/固定预览、版本/来源、空间切换；弹窗焦点/取消；窄屏回归                                                                       | Firefox/WebKit、完整无障碍审计；P1                                                     | 14原浏览器回归+3readiness验收；短视口几何断言                   |
-| 文档网站              | 10页本地文档站、查询OpenAPI、llms.txt；构建、桌面/窄屏和链接/路径检查通过                                                                       | 公开部署、完整API reference自动生成；P1                                                | 站点构建、内部链接检查、示例真实HTTP调用；不自动公开部署        |
+| 文档网站              | 12页本地文档站、查询OpenAPI、llms.txt；构建、桌面/窄屏和链接/路径检查通过                                                                       | 公开部署、完整API reference自动生成；P1                                                | 站点构建、内部链接检查、示例真实HTTP调用；不自动公开部署        |
 | 可观测性              | health存活；owner readiness依赖完整性审计、脱敏故障码、request ID；离线diagnose                                                                 | 结构化指标/trace/告警、SLO和低成本探针；P2                                             | 对象损坏、索引lag、失败任务注入；不能把health当健康审计         |
 | 可靠性/规模           | 单机authority锁、重启恢复、事务故障、预算测试                                                                                                   | 诊断4并发/15秒和队列100已实测；HA、物理断电、全局压测/容量与恢复目标；P2               | 多进程/故障注入；未来负载曲线/磁盘配额/恢复演练                 |
 | 扫描/供应链           | pinned依赖、忽略安装脚本、静态边界和有限秘密检查；CI check入口                                                                                  | 官方pnpm审计已执行0已知漏洞；完整秘密/SAST、SBOM、签名与持续漏洞响应；P0               | 必需检查不可删除；未来扫描留真实结果和例外期限                  |
@@ -42,3 +42,5 @@ GitHub实际仓库状态：既有工程CI已在main合并提交通过；main当�
 `pnpm check`包含格式、lint、类型、文档、边界、skill、有限秘密检查、harness、业务测试和Web构建。浏览器另跑真实隔离fixture；readiness用例要求带docs/architecture/decision.md的合成多级仓库，不能缺fixture改skip。合入提交的实测结果记录于PR和CI；本文件的未来自动验收方法不是已经通过的测试。全部验收不需要真实账号、付费模型或私有会话。
 
 本批安全与部署证据、TLS尚未live验收及SSO/RBAC建议见[部署安全](DEPLOYMENT_SECURITY.md)。不将零已知依赖漏洞、单机规模实验或production环境标记等同企业就绪。
+
+本批应用出站与有界审计详见[出站与审计](EGRESS_AUDIT.md)；下一阶段建议single-tenant团队，选择及待确认项见[身份决策稿](TEAM_IDENTITY_DECISION.md)，尚未接IdP。

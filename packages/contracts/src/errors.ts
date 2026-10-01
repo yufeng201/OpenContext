@@ -1,6 +1,13 @@
 /** Only reviewed machine codes may cross an API or persistent diagnostic boundary. */
 const codes = new Set([
   'ACCESS_DENIED',
+  'EGRESS_DENIED',
+  'TEST_CONFIGURATION_DENIED',
+  'EGRESS_TIMEOUT',
+  'EGRESS_RESOLUTION_FAILED',
+  'EGRESS_REDIRECT_DENIED',
+  'AUDIT_UNAVAILABLE',
+  'INVALID_AUDIT_EVENT',
   'CHAT_READABLE',
   'FIXTURE_OK',
   'AUTH_FAILED',

@@ -38,6 +38,11 @@ export function preflight(env: Record<string, string | undefined>): object {
     !/^engineStrict: true$/m.test(policy)
   )
     throw new Error('INSTALL_POLICY_UNSAFE');
+  if (
+    env['NODE_ENV'] === 'production' &&
+    env['OPENCONTEXT_TEST_REPO_ROOT'] !== undefined
+  )
+    throw new Error('TEST_CONFIGURATION_DENIED');
   const token = env['OPENCONTEXT_OWNER_TOKEN'] ?? '';
   if (token.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
   if (token.length > 256) throw new Error('OWNER_TOKEN_TOO_LONG');

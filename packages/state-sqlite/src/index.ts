@@ -1,3 +1,4 @@
+import { parseAuditEvent, type AuditEvent } from '@opencontext/contracts/audit';
 import { safeErrorCode } from '@opencontext/contracts/errors';
 import {
   createHash,
@@ -199,6 +200,11 @@ export class Catalog {
       CREATE TABLE IF NOT EXISTS catalog_meta (
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS audit_events (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL,
+        event_json TEXT NOT NULL CHECK(json_valid(event_json))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS audit_time ON audit_events(time);
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
         head TEXT, created_at TEXT NOT NULL
@@ -642,6 +648,82 @@ export class Catalog {
       )
       .run(id, digest(token), projectId);
     return { id, token };
+  }
+
+  appendAudit(event: AuditEvent): void {
+    this.assertAuthority();
+    parseAuditEvent(event);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db
+        .prepare('INSERT INTO audit_events(time,event_json) VALUES(?,?)')
+        .run(event.time, JSON.stringify(event));
+      this.db
+        .prepare('DELETE FROM audit_events WHERE time < ?')
+        .run(new Date(Date.now() - 30 * 86400000).toISOString());
+      this.db.exec(
+        'DELETE FROM audit_events WHERE sequence <= COALESCE((SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1 OFFSET 10000), -1)',
+      );
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  auditEvents(after = 0, limit = 100, until?: number) {
+    if (
+      !Number.isSafeInteger(after) ||
+      after < 0 ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > 1000 ||
+      (until !== undefined && (!Number.isSafeInteger(until) || until < 0))
+    )
+      throw new Error('INVALID_AUDIT_EVENT');
+    const snapshotSequence =
+      until ??
+      Number(
+        this.db
+          .prepare(
+            'SELECT COALESCE(MAX(sequence),0) AS sequence FROM audit_events',
+          )
+          .get()?.['sequence'],
+      );
+    const events = this.db
+      .prepare(
+        'SELECT sequence,event_json FROM audit_events WHERE sequence > ? AND sequence <= ? AND time >= ? ORDER BY sequence LIMIT ?',
+      )
+      .all(
+        after,
+        snapshotSequence,
+        new Date(Date.now() - 30 * 86400000).toISOString(),
+        limit,
+      )
+      .map((row) => ({
+        sequence: Number(row['sequence']),
+        ...parseAuditEvent(JSON.parse(str(row, 'event_json'))),
+      }));
+    const oldest = this.db
+      .prepare(
+        'SELECT MIN(sequence) AS sequence FROM audit_events WHERE time >= ?',
+      )
+      .get(new Date(Date.now() - 30 * 86400000).toISOString());
+    return {
+      events,
+      oldestSequence: oldest?.['sequence'] ?? null,
+      nextCursor: events.at(-1)?.sequence ?? after,
+      snapshotSequence,
+      retention: { maxEvents: 10000, maxDays: 30 },
+      tamperEvident: false,
+    };
+  }
+  auditRequestForJob(jobId: string): string | null {
+    const row = this.db
+      .prepare(
+        "SELECT json_extract(event_json,'$.requestId') AS request_id FROM audit_events WHERE json_extract(event_json,'$.jobId')=? AND json_extract(event_json,'$.action')='task.enqueue' ORDER BY sequence DESC LIMIT 1",
+      )
+      .get(jobId);
+    return row ? nullable(row, 'request_id') : null;
   }
 
   revokeToken(id: string): void {

@@ -41,3 +41,5 @@ PRD AC-01–AC-22、用户流程 UJ-01–UJ-13 仍是待实现的应用验收。
 - [停写备份、恢复与依赖诊断](BACKUP_RECOVERY.md)：v1快照、仅新目录恢复、撤权与合成演练。
 
 - [私有部署与安全门槛](DEPLOYMENT_SECURITY.md)：首装/升级预检、TLS前置、已复现风险与SSO决策边界。
+
+本批连接器出站默认策略、真实合成TLS/Git实验与可修改审计基础见[出站与审计](EGRESS_AUDIT.md)；下一阶段一页提案见[团队身份决策](TEAM_IDENTITY_DECISION.md)。

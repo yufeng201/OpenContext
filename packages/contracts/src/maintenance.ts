@@ -65,6 +65,7 @@ const dependencyCodes = [
   'INDEX_CORRUPT',
   'INDEX_REBUILD_FAILED',
   'SCHEDULER_FAILED',
+  'AUDIT_UNAVAILABLE',
 ] as const;
 const DependencySchema = Type.Object(
   {
@@ -103,6 +104,7 @@ export const ReadinessReportSchema = Type.Object(
       pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     }),
     scheduler: DependencySchema,
+    audit: Type.Optional(DependencySchema),
   },
   { additionalProperties: false },
 );

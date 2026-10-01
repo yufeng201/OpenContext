@@ -22,6 +22,12 @@ import type {
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 export type McpHandlers = {
+  audit?(
+    request: FastifyRequest,
+    tool: string,
+    args: unknown,
+    code: string,
+  ): void;
   authenticate(request: FastifyRequest): Principal;
   projects(principal: Principal): Project[];
   tree(principal: Principal, projectId: string): FileEntry[];
@@ -135,11 +141,18 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
           default:
             throw new McpError(ErrorCode.MethodNotFound, 'Unknown tool');
         }
+        handlers.audit?.(request, message.params.name, args, 'OK');
         return {
           content: [{ type: 'text', text: JSON.stringify(result) }],
           structuredContent: result,
         };
       } catch (error) {
+        handlers.audit?.(
+          request,
+          message.params.name,
+          message.params.arguments,
+          error instanceof McpError ? 'INVALID_SCHEMA' : safeErrorCode(error),
+        );
         if (error instanceof McpError) {
           const known = [
             new McpError(ErrorCode.InvalidParams, 'Invalid search arguments'),

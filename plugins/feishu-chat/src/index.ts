@@ -1,3 +1,5 @@
+import { safeErrorCode } from '@opencontext/contracts/errors';
+import { pinnedHttpsGet } from '@opencontext/plugin-sdk/egress';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -270,7 +272,9 @@ function responseCode(code: number): string {
 export function createFeishuChatDefinition(
   options: FeishuChatOptions,
 ): ConnectorDefinition {
-  const request = options.fetch ?? globalThis.fetch;
+  const request =
+    options.fetch ??
+    pinnedHttpsGet({ hosts: ['open.feishu.cn', 'open.larksuite.com'] });
   const evidence = options.evidence ?? (options.fetch ? 'simulated' : 'live');
   const now = options.now ?? Date.now;
   const sleep =
@@ -321,9 +325,13 @@ export function createFeishuChatDefinition(
           redirect: 'error',
           signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
         });
-      } catch {
+      } catch (error) {
         if (signal.aborted) fail('CANCELLED');
-        fail('NETWORK_ERROR');
+        fail(safeErrorCode(error, 'NETWORK_ERROR'));
+      }
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel();
+        fail('EGRESS_REDIRECT_DENIED');
       }
       if (response.status === 429 || response.status >= 500) {
         await response.body?.cancel();
@@ -461,6 +469,10 @@ export function createFeishuChatDefinition(
     input: ConnectorInvocation,
     context: ExecutionContext,
   ): Promise<ConnectorOutput> {
+    context = {
+      ...context,
+      signal: AbortSignal.any([context.signal, AbortSignal.timeout(60_000)]),
+    };
     cancelled(context.signal);
     const { config, start, end } = configuration(input.config, now());
     if (
@@ -778,7 +790,11 @@ export function createFeishuChatDefinition(
       trust: 'official-trusted-native',
     },
     capability: 'connector',
-    artifactPaths: [import.meta.url],
+    artifactPaths: [
+      import.meta.url,
+      new URL('../../../packages/plugin-sdk/src/egress.ts', import.meta.url)
+        .href,
+    ],
     title: 'Feishu / Lark group archive',
     description:
       'Read-only bounded chat and discovered-thread synchronization; independent secret reference.',

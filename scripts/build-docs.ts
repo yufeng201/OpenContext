@@ -13,6 +13,8 @@ const pages = [
   ['operations', '运维与安全', 'OPERATIONS.md'],
   ['backup-recovery', '备份恢复与诊断', 'BACKUP_RECOVERY.md'],
   ['deployment-security', '部署与安全门槛', 'DEPLOYMENT_SECURITY.md'],
+  ['egress-audit', '出站与审计', 'EGRESS_AUDIT.md'],
+  ['team-identity', '团队身份决策', 'TEAM_IDENTITY_DECISION.md'],
   ['readiness', '产品就绪矩阵', 'PRODUCT_READINESS.md'],
 ] as const;
 const output = resolve('apps/docs/dist');

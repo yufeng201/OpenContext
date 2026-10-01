@@ -79,3 +79,5 @@ pnpm audit --json
 建议下一批先确认用户/团队/空间共享边界，再选OIDC适配器；后端主体改为稳定subject与space owner/reader关系，token映射最小项目scope，REST/MCP共用同一authorize gate。保留fileId/revision/current-source门禁与撤销，避免建第二套权限缓存。需要决定：个人实例还是多人组织、空间成员谁管理、逐来源限制是否必要、匿名入口是否永远关闭、代理与IdP谁可信。
 
 受控个人实例可先保留现有owner/reader模式；团队实例须完成上述决策、身份/撤销/审计矩阵后才开放。不能简单把所有SSO用户换成owner，也不为企业标签重写文件/插件架构。真实飞书群权限/撤权与认证模型采用仍停在用户明确授权后的live gate；本批不创建凭据或修改真实Agent配置。详见[产品就绪矩阵](PRODUCT_READINESS.md)。
+
+连接器当前新增DNS全部答案校验、实际连接pin与0重定向策略；保留OS隔离门槛。控制库新增有界审计，owner导出与readiness故障降级，非防篡改。具体实测边界见[出站与审计](EGRESS_AUDIT.md)，团队single-tenant提案见[团队身份决策](TEAM_IDENTITY_DECISION.md)。

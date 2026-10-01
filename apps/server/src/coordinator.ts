@@ -33,13 +33,18 @@ export class Coordinator {
   lastIndexError: string | null = null;
   lastWorkerError: string | null = null;
 
+  private readonly audit:
+    | ((run: Run, result: 'success' | 'failed', code: string) => void)
+    | undefined;
   constructor(
     catalog: Catalog,
     store: FileStore,
     dataRoot: string,
     registry: StaticRegistry,
     allowedLocalRepoRoot?: string,
+    audit?: (run: Run, result: 'success' | 'failed', code: string) => void,
   ) {
+    this.audit = audit;
     this.catalog = catalog;
     this.store = store;
     this.dataRoot = dataRoot;
@@ -77,12 +82,20 @@ export class Coordinator {
       if (!run) break;
       try {
         await this.execute(run);
+        const completed = this.catalog.getRun(run.id);
+        this.audit?.(
+          run,
+          completed?.state === 'published' ? 'success' : 'failed',
+          completed?.error ??
+            (completed?.state === 'published' ? 'OK' : 'PROCESSING_FAILED'),
+        );
       } catch (error) {
         if (!this.abort.signal.aborted) {
           // Persist stable diagnostics, not raw process output or URLs/tokens.
           const code = safeErrorCode(error, 'PROCESSING_FAILED');
           try {
             this.catalog.failRun(run, code);
+            this.audit?.(run, 'failed', code);
           } catch {
             /* revoked/lost lease already has a newer owner */
           }
