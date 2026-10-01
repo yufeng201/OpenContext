@@ -1,0 +1,41 @@
+{
+  "schema": "opencontext.session-import/v1",
+  "provider": "claude",
+  "projectScope": "synthetic-project",
+  "sessionId": "00000000-0000-4000-8000-000000000003",
+  "complete": true,
+  "payload": [
+    {
+      "type": "user",
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "session_id": "00000000-0000-4000-8000-000000000003",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "How should this failure be retried?"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "parent_agent_id": null
+    },
+    {
+      "type": "assistant",
+      "uuid": "00000000-0000-4000-8000-000000000002",
+      "session_id": "00000000-0000-4000-8000-000000000003",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "记忆：这个合成项目使用可重建的全文索引。\n经验：失败重试前先验证输入版本。"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "parent_agent_id": null
+    }
+  ]
+}

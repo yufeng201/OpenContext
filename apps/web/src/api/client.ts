@@ -66,6 +66,10 @@ export async function api<T>(
 
 export function errorText(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === 'IMPORT_CONFLICT')
+      return '此同名导出已被其他操作更新。列表已刷新，请重新选择文件并确认后上传；不会自动覆盖。 (IMPORT_CONFLICT)';
+    if (error.code === 'BINDING_REVOKED')
+      return '此来源已撤销，不能继续同步或加工；如需重新授权，请添加新来源。 (BINDING_REVOKED)';
     const explanations: Record<number, string> = {
       400: '输入未通过服务器校验，请检查字段。',
       401: '凭据无效或会话已过期，请重新连接。',

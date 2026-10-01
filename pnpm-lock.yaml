@@ -11,6 +11,9 @@ importers:
       '@eslint/js':
         specifier: 10.0.1
         version: 10.0.1(eslint@10.11.0(jiti@2.7.0))
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
       '@types/node':
         specifier: 24.19.0
         version: 24.19.0
@@ -41,12 +44,21 @@ importers:
       '@opencontext/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@opencontext/feishu-chat':
+        specifier: workspace:*
+        version: link:../../plugins/feishu-chat
+      '@opencontext/feishu-chat-analysis':
+        specifier: workspace:*
+        version: link:../../plugins/feishu-chat-analysis
       '@opencontext/markdown-processor':
         specifier: workspace:*
         version: link:../../plugins/markdown-processor
       '@opencontext/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@opencontext/plugin-host':
+        specifier: workspace:*
+        version: link:../../packages/plugin-host
       '@opencontext/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
@@ -56,12 +68,21 @@ importers:
       '@opencontext/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval
+      '@opencontext/session-candidates':
+        specifier: workspace:*
+        version: link:../../plugins/session-candidates
+      '@opencontext/session-connector':
+        specifier: workspace:*
+        version: link:../../plugins/session-connector
       '@opencontext/state-sqlite':
         specifier: workspace:*
         version: link:../../packages/state-sqlite
       '@opencontext/storage-fs':
         specifier: workspace:*
         version: link:../../packages/storage-fs
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
       fastify:
         specifier: 5.12.5
         version: 5.12.5
@@ -158,11 +179,26 @@ importers:
         specifier: workspace:*
         version: link:../retrieval
 
+  packages/plugin-host:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@opencontext/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
   packages/plugin-sdk:
     dependencies:
       '@opencontext/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
 
   packages/retrieval:
     dependencies:
@@ -182,6 +218,30 @@ importers:
         specifier: workspace:*
         version: link:../contracts
 
+  plugins/feishu-chat:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@opencontext/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
+  plugins/feishu-chat-analysis:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@opencontext/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
   plugins/markdown-processor:
     dependencies:
       '@opencontext/contracts':
@@ -190,6 +250,9 @@ importers:
       '@opencontext/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
 
   plugins/repo-connector:
     dependencies:
@@ -199,6 +262,33 @@ importers:
       '@opencontext/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
+  plugins/session-candidates:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@opencontext/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
+  plugins/session-connector:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@opencontext/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
 
 packages:
 

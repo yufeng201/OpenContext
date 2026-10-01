@@ -41,9 +41,12 @@ test('real Git → source search → fixed revision → derived navigation → l
   }
   await page.getByLabel('空间名称').fill(name);
   await page.getByRole('button', { name: '创建空间' }).click();
-  await expect(
-    page.getByRole('heading', { name: '添加 Git 仓库' }),
-  ).toBeVisible();
+  await page
+    .getByRole('navigation', { name: '主要导航' })
+    .getByRole('link', { name: '数据源', exact: true })
+    .click();
+  await page.getByRole('button', { name: '新增数据源' }).click();
+  await expect(page.getByRole('heading', { name: '添加来源' })).toBeVisible();
   await page.getByLabel('来源名称').fill('合成仓库');
   await page.getByLabel('仓库地址').fill(repoUrl);
   await page.getByLabel('分支', { exact: true }).fill('main');
@@ -99,7 +102,7 @@ test('real Git → source search → fixed revision → derived navigation → l
   });
   await page
     .getByRole('navigation', { name: '主要导航' })
-    .getByRole('link', { name: '来源', exact: true })
+    .getByRole('link', { name: '数据源', exact: true })
     .click();
   await page.getByRole('button', { name: '生成 Markdown 导航' }).click();
   await expect(
@@ -125,7 +128,9 @@ test('real Git → source search → fixed revision → derived navigation → l
     .getByRole('navigation', { name: '主要导航' })
     .getByRole('link', { name: '文件', exact: true })
     .click();
-  await expect(page.getByText('产物', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('navigation', { name: '目录树' })).toContainText(
+    'derived',
+  );
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(
     page.getByRole('navigation', { name: '主要导航' }),
@@ -202,13 +207,15 @@ test('revoking a source clears an already-open fixed revision without manual ref
   await page.getByLabel('访问 token').fill(ownerToken);
   await page.getByRole('button', { name: '连接空间' }).click();
   const reader = page.getByRole('region', { name: '固定版本原文' });
-  await expect(reader.locator('pre')).toContainText('browser-needle');
+  await expect(reader.locator('.markdown-preview')).toContainText(
+    'browser-needle',
+  );
   const revoked = await page.request.delete(base + '/bindings/' + binding.id, {
     headers,
   });
   expect(revoked.ok()).toBe(true);
   await expect(reader).toContainText('已清除缓存正文', { timeout: 8000 });
-  await expect(reader.locator('pre')).toHaveCount(0);
+  await expect(reader.locator('.markdown-preview')).toHaveCount(0);
   await expect(reader).not.toContainText(file.logicalPath);
   await expect(
     reader.getByRole('button', { name: '复制固定引用' }),

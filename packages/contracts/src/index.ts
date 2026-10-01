@@ -1,4 +1,6 @@
 import { Type, type Static } from '@sinclair/typebox';
+import type { PluginInstanceLock, ExecutionLock } from './plugins.ts';
+export * from './plugins.ts';
 
 export const Id = Type.String({ minLength: 1, maxLength: 120 });
 export const CollectionSchema = Type.Union([
@@ -16,7 +18,7 @@ export const CreateBindingSchema = Type.Object(
   {
     name: Type.String({ minLength: 1, maxLength: 80 }),
     repoUrl: Type.String({ minLength: 1, maxLength: 2000 }),
-    branch: Type.String({ minLength: 1, maxLength: 200, default: 'main' }),
+    branch: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
   },
   { additionalProperties: false },
 );
@@ -33,8 +35,9 @@ export const SearchSchema = Type.Object(
   },
   { additionalProperties: false },
 );
+export const MAX_AUTH_TOKEN_LENGTH = 256;
 export const LoginSchema = Type.Object(
-  { token: Type.String({ minLength: 16, maxLength: 256 }) },
+  { token: Type.String({ minLength: 16, maxLength: MAX_AUTH_TOKEN_LENGTH }) },
   { additionalProperties: false },
 );
 export const ReadSchema = Type.Object(
@@ -60,7 +63,9 @@ export type Binding = {
   name: string;
   instanceRef: string;
   packageRef: string;
-  config: { repoUrl: string; branch: string };
+  config: Record<string, unknown>;
+  connector: PluginInstanceLock | null;
+  processor: PluginInstanceLock | null;
   active: boolean;
   sourceVersion: string | null;
   lastError: string | null;
@@ -119,6 +124,7 @@ export type Run = {
   error: string | null;
   createdAt: string;
   skipped?: { path: string; reason: string }[];
+  execution?: ExecutionLock | null;
 };
 export type ApiFailure = {
   error: { code: string; message: string; correlationId?: string };

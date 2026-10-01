@@ -1,15 +1,25 @@
 # OpenContext 设计与开发入口
 
-本目录保留 2026-09-30 的 v3 产品设计，并补充最小工程 harness。已有可执行工程检查与首条业务实现，可从源码本机运行；没有已发布 npm 包或 Docker 镜像。实际入口、测试覆盖与限制见[实施状态](IMPLEMENTATION_STATUS.md)，不代表完整P1完成。
+本目录保留产品设计与实际开发说明。**第一次运行请从[快速开始](QUICKSTART.md)进入**；[实施状态](IMPLEMENTATION_STATUS.md)列出真实能力、验证层次和限制。当前是本机开发预览版，没有已发布 npm 包、Docker 镜像或生产部署包，不代表完整P1完成。
+
+## 当前可运行入口
+
+- [仓库首页](../README.md)：定位、工具前提、最短启动和当前边界。
+- [快速开始](QUICKSTART.md)：Git→检索→固定引用→Markdown→MCP，含模式隔离、查询token和恢复步骤。
+- [Session 主动导入](SESSION_IMPORT.md)：用户选择导出文件，区别原文、归一化和确定性候选；不扫描电脑或启动模型。
+- [飞书群采集](FEISHU_CHAT.md)：限定群与时间范围、连接诊断、模拟/真实边界及归档恢复。
+- [插件开发](PLUGIN_DEVELOPMENT.md)：当前静态可信 connector/processor 注册与锁定机制，区别实际接口和八类目标。
+- [实施状态](IMPLEMENTATION_STATUS.md)：实现事实与未实现项；协议连通不等于模型自主调用通过。
+- [开发指南](DEVELOPMENT.md)：工程检查、测试与贡献流程。
 
 ## 产品设计
 
 - [PRD](PRD.md)：目标、编号需求、验收与阶段。
 - [技术方案](TECHNICAL_DESIGN.md)：文件与控制库、插件、发布一致性和安全边界。
 - [实施蓝图](IMPLEMENTATION_BLUEPRINT.md)：未来业务目录、接口、配置与规则示例。
-- [用户使用闭环](USER_JOURNEYS.md)：部署、Agent/Git/飞书/会话接入、召回及故障恢复。
+- [用户使用闭环](USER_JOURNEYS.md)：未来部署、Agent/Git/飞书/会话接入、召回及故障恢复的目标与验收设计，不是当前安装手册。
 
-最短产品路径仍为自托管初始化→导入一个文件→搜索并打开引用，无需 embedding 或本机 worker。需要 Wiki 时用官方 Repo Wiki 预设；DAG/JSON 留高级配置。日常 Agent 使用 MCP + Skill，Hook 可选，后台 coding CLI 加工单独授权。
+目标产品路径是自托管初始化→导入一个文件→搜索并打开引用，无需embedding或本机worker。官方Repo Wiki预设、日常Agent Skill/Hook和后台coding CLI加工属于后续目标；当前有公开Git文本导入、主动Session JSON导入、确定性Markdown/显式标记候选与只读MCP，不把设计叙述当成现成按钮。
 
 OpenContext 是受管理的版本化文件库。内容导出便于阅读；完整恢复权威 head、授权和运行状态需要内容与控制库联合备份。原件及各级产物共用检索 gate；人工提升保持稳定身份，纠正关系不等于 blanket authored 优先。
 
@@ -22,4 +32,6 @@ OpenContext 是受管理的版本化文件库。内容导出便于阅读；完�
 
 PRD AC-01–AC-22、用户流程 UJ-01–UJ-13 仍是待实现的应用验收。pnpm check 现在同时运行工程检查、业务Vitest与Web构建；浏览器另跑真实Playwright流程。全套PRD尚未全部实现，不能用这些子集结果替代完整部署/隔离验收。
 
-历史原稿与 checkpoint 仅留工作区，未改字节；独立设计包不需要它们。本次交付含五份主文档、工程指南及实施状态；单独 harness 包按仓库根布局提供规则、配置、检查脚本和必要文档，不含依赖、Git 元数据、秘密或缓存。根目录 README、项目许可证与账户权限未改。
+历史原稿与 checkpoint 仅留工作区，未改字节；公开源码不依赖私有归档或临时验收材料。源码以 Git 提交为准，设计阅读包与早期 harness 检查点不能替代当前实现。项目许可证与账户权限未在本轮变更。
+
+企业与接入成熟度、缺口及下一阶段验收见 [产品就绪矩阵](PRODUCT_READINESS.md)。当前仅为受控开发预览。

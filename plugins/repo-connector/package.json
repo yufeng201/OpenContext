@@ -6,6 +6,7 @@
   "exports": "./src/index.ts",
   "dependencies": {
     "@opencontext/contracts": "workspace:*",
-    "@opencontext/plugin-sdk": "workspace:*"
+    "@opencontext/plugin-sdk": "workspace:*",
+    "@sinclair/typebox": "0.34.52"
   }
 }

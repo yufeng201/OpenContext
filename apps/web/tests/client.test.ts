@@ -3,6 +3,8 @@ import {
   api,
   handleAccessDenied,
   resetSessionRequests,
+  ApiError,
+  errorText,
 } from '../src/api/client';
 
 afterEach(() => {
@@ -11,6 +13,11 @@ afterEach(() => {
 });
 
 describe('Web request boundary', () => {
+  it('does not suggest retrying a permanently revoked source', () => {
+    const message = errorText(new ApiError(409, 'BINDING_REVOKED'));
+    expect(message).toContain('请添加新来源');
+    expect(message).not.toContain('刷新后重试');
+  });
   it('does not send an empty JSON Content-Type for an action with no body', async () => {
     const fetch = vi
       .fn()

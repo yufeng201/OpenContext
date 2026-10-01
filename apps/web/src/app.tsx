@@ -1,14 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import {
-  BookOpen,
   FileText,
   FolderGit2,
   Layers3,
+  Database,
+  Puzzle,
+  X,
   LogOut,
-  Plus,
   RefreshCw,
   Search,
   Workflow,
@@ -18,7 +19,6 @@ import {
 } from 'lucide-react';
 import {
   CreateProjectSchema,
-  CreateBindingSchema,
   LoginSchema,
   SearchSchema,
 } from '@opencontext/contracts';
@@ -29,9 +29,9 @@ import type {
   Run,
   FileEntry,
   SearchInput,
-  CreateBindingInput,
   SearchResult,
   ReadResult,
+  PluginDescriptor,
 } from '@opencontext/contracts';
 import {
   api,
@@ -60,12 +60,25 @@ import {
   Empty,
 } from './components/ui/panels';
 import { cn } from './lib/utils';
-import { selectBindingRun } from './lib/binding-run';
+import { runLabel } from './lib/binding-run';
+import { BindingRow, CreateBinding } from './features/source-plugins';
+import {
+  DirectoryTree,
+  FileBrowser,
+  parentPath,
+  baseName,
+  ownershipLabel,
+} from './features/file-browser';
+import {
+  isLocallyDisconnected,
+  setLocallyDisconnected,
+} from './lib/session-lock';
 
 type Session = Pick<Principal, 'role' | 'projectId'>;
 const views = [
-  { id: 'sources', label: '来源', icon: FolderGit2 },
   { id: 'files', label: '文件', icon: FileText },
+  { id: 'sources', label: '数据源', icon: Database },
+  { id: 'plugins', label: '插件', icon: Puzzle },
   { id: 'search', label: '搜索', icon: Search },
   { id: 'runs', label: '任务', icon: Workflow },
 ] as const;
@@ -77,10 +90,18 @@ const short = (value: string | null) =>
 export function App() {
   const client = useQueryClient();
   const [generation, setGeneration] = useState(0);
-  const [accessMessage, setAccessMessage] = useState('');
+  const [accessMessage, setAccessMessage] = useState(() =>
+    isLocallyDisconnected()
+      ? '此标签页已断开。重新输入 token 后才会连接。'
+      : '',
+  );
+  const [disconnecting, setDisconnecting] = useState(false);
   const session = useQuery({
     queryKey: ['session', generation],
+    // Local disconnection must resolve even while the browser is offline.
+    networkMode: 'always',
     queryFn: async ({ signal }) => {
+      if (isLocallyDisconnected()) return null;
       try {
         return await api<Session>('/session', { signal });
       } catch (error) {
@@ -102,6 +123,24 @@ export function App() {
     void client.cancelQueries();
     client.clear();
     setGeneration((value) => value + 1);
+  };
+  const disconnect = () => {
+    // Do not let an offline/paused mutation retain private content on screen.
+    setLocallyDisconnected(true);
+    setAccessMessage('本地内容已清除，正在清理此浏览器的会话 cookie…');
+    setDisconnecting(true);
+    clearSession();
+    void api('/session', {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(5000),
+    })
+      .then(() => setAccessMessage('已断开连接，并清理此浏览器的会话 cookie。'))
+      .catch(() =>
+        setAccessMessage(
+          '本地内容已清除；服务器无法确认退出，HttpOnly 会话 cookie 可能仍保留。此标签页不会自动重连；恢复网络后可重新连接，或清除此站点的 cookie。',
+        ),
+      )
+      .finally(() => setDisconnecting(false));
   };
   useEffect(
     () =>
@@ -133,7 +172,9 @@ export function App() {
     return (
       <Login
         message={accessMessage}
+        disconnecting={disconnecting}
         onConnected={() => {
+          setLocallyDisconnected(false);
           setAccessMessage('');
           clearSession();
         }}
@@ -144,16 +185,18 @@ export function App() {
       key={generation}
       session={session.data}
       generation={generation}
-      onLogout={clearSession}
+      onLogout={disconnect}
     />
   );
 }
 
 function Login({
   message,
+  disconnecting,
   onConnected,
 }: {
   message: string;
+  disconnecting: boolean;
   onConnected: () => void;
 }) {
   const form = useForm<{ token: string }>({ defaultValues: { token: '' } });
@@ -216,7 +259,10 @@ function Login({
                 </Field>
                 {message ? <Alert>{message}</Alert> : null}
                 {login.error ? <Alert>{errorText(login.error)}</Alert> : null}
-                <Button type="submit" disabled={login.isPending}>
+                <Button
+                  type="submit"
+                  disabled={login.isPending || disconnecting}
+                >
                   {login.isPending ? '正在连接…' : '连接空间'}
                   <ArrowUpRight data-icon="inline-end" />
                 </Button>
@@ -244,21 +290,29 @@ function Workspace({
   const client = useQueryClient();
   const [params, setParams] = useSearchParams();
   const projectId = params.get('project') ?? '';
-  const requestedView = params.get('view') ?? 'sources';
+  const [sourceDrawer, setSourceDrawer] = useState(false);
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
+  const requestedView = params.get('view') ?? 'files';
   const view = views.some((item) => item.id === requestedView)
     ? requestedView
-    : 'sources';
+    : 'files';
   const scope = ['data', generation, projectId] as const;
   const projects = useQuery({
     queryKey: ['data', generation, 'projects'],
     queryFn: ({ signal }) => api<Project[]>('/projects', { signal }),
     refetchInterval: 10_000,
   });
+  const plugins = useQuery({
+    queryKey: ['data', generation, 'plugins'],
+    enabled: session.role === 'owner',
+    queryFn: ({ signal }) => api<PluginDescriptor[]>('/plugins', { signal }),
+  });
   const project = projects.data?.find((entry) => entry.id === projectId);
   useEffect(() => {
     if (!projectId && projects.data?.[0])
       setParams(
-        { project: projects.data[0].id, view: 'sources' },
+        { project: projects.data[0].id, view: 'files' },
         { replace: true },
       );
   }, [projectId, projects.data, setParams]);
@@ -302,25 +356,27 @@ function Workspace({
       queryKey: ['data', generation, projectId, 'search'],
     });
   }, [client, generation, projectId, publishedCommit]);
-  const logout = useMutation({
-    mutationFn: () => api('/session', { method: 'DELETE' }),
-    onSuccess: onLogout,
-  });
   const invalidate = () =>
     client.invalidateQueries({ queryKey: ['data', generation] });
   const navigate = (next: Record<string, string>) =>
-    setParams({ project: projectId, view, ...next });
+    setParams({
+      ...Object.fromEntries(params),
+      project: projectId,
+      view,
+      ...next,
+    });
   const queryFailure =
-    projects.error ?? bindings.error ?? runs.error ?? tree.error;
+    projects.error ??
+    plugins.error ??
+    bindings.error ??
+    runs.error ??
+    tree.error;
   const files = tree.data?.filter((file) => !file.tombstone) ?? [];
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[228px_minmax(0,1fr)]">
-      <aside className="flex flex-col gap-6 border-b bg-card px-5 py-5 lg:min-h-screen lg:border-r lg:border-b-0">
-        <Link
-          to="/"
-          className="flex items-center gap-2.5 font-semibold tracking-tight"
-        >
-          <Layers3 className="size-6 text-primary" />
+    <div className="workspace-shell">
+      <aside className="workspace-sidebar">
+        <Link to="/" className="brand-link">
+          <Layers3 className="size-6" />
           OpenContext
         </Link>
         <Field>
@@ -329,9 +385,10 @@ function Workspace({
             id="project-select"
             className={selectClass}
             value={projectId}
-            onChange={(event) =>
-              setParams({ project: event.target.value, view: 'sources' })
-            }
+            onChange={(event) => {
+              setSourceDrawer(false);
+              setParams({ project: event.target.value, view: 'files' });
+            }}
           >
             <option value="" disabled>
               选择空间
@@ -343,23 +400,30 @@ function Workspace({
             ))}
           </select>
         </Field>
-        {session.role === 'owner' && project ? (
-          <details className="rounded-lg border p-3 text-sm">
-            <summary className="cursor-pointer font-medium">新建空间</summary>
-            <div className="mt-4">
-              <CreateProject
-                onCreated={(entry) => {
-                  void invalidate();
-                  setParams({ project: entry.id, view: 'sources' });
-                }}
-              />
-            </div>
-          </details>
+        {project ? (
+          <DirectoryTree
+            key={projectId}
+            files={files}
+            projectId={projectId}
+            current={
+              view === 'files'
+                ? (params.get('dir') ??
+                  parentPath(
+                    files.find((file) => file.fileId === params.get('file'))
+                      ?.logicalPath ?? '',
+                  ))
+                : '\0'
+            }
+            onNavigate={(path) =>
+              setParams({
+                project: projectId,
+                view: 'files',
+                ...(path ? { dir: path } : {}),
+              })
+            }
+          />
         ) : null}
-        <nav
-          aria-label="主要导航"
-          className="grid grid-cols-4 gap-1 lg:flex lg:flex-col"
-        >
+        <nav aria-label="主要导航" className="auxiliary-navigation">
           {views.map(({ id, label, icon: Icon }) => (
             <Link
               key={id}
@@ -377,39 +441,52 @@ function Workspace({
             </Link>
           ))}
         </nav>
+        {session.role === 'owner' && project ? (
+          <details className="rounded-lg border p-3 text-sm">
+            <summary className="cursor-pointer font-medium">新建空间</summary>
+            <div className="mt-4">
+              <CreateProject
+                onCreated={(entry) => {
+                  void invalidate();
+                  setParams({ project: entry.id, view: 'files' });
+                }}
+              />
+            </div>
+          </details>
+        ) : null}
         <div className="hidden grow lg:block" />
         <div className="flex items-center justify-between gap-2 lg:flex-col lg:items-start">
           <Badge>{session.role === 'owner' ? '所有者' : '项目只读'}</Badge>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => logout.mutate()}
-            disabled={logout.isPending}
-          >
+          <Button variant="ghost" size="sm" onClick={onLogout}>
             <LogOut />
             退出连接
           </Button>
         </div>
-        {logout.error ? <Alert>{errorText(logout.error)}</Alert> : null}
       </aside>
-      <main className="min-w-0 p-5 md:p-8 lg:p-10">
-        <header className="mb-7 flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
-              {project?.name ?? '开始使用'}
-            </p>
-            <h1 className="text-2xl font-semibold tracking-tight">
-              {views.find((item) => item.id === view)?.label}
-            </h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              来源和加工产物，在同一空间按版本查阅。
-            </p>
-          </div>
-          <Button variant="outline" size="sm" onClick={() => void invalidate()}>
-            <RefreshCw />
-            刷新状态
-          </Button>
-        </header>
+      <main className={cn('workspace-main', view === 'files' && 'file-main')}>
+        {view !== 'files' ? (
+          <header className="page-header">
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                {project?.name ?? '开始使用'}
+              </p>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {views.find((item) => item.id === view)?.label}
+              </h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                来源和加工产物，在同一空间按版本查阅。
+              </p>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void invalidate()}
+            >
+              <RefreshCw />
+              刷新状态
+            </Button>
+          </header>
+        ) : null}
         {queryFailure ? (
           <Alert className="mb-5">{errorText(queryFailure)}</Alert>
         ) : null}
@@ -429,7 +506,7 @@ function Workspace({
                 <CreateProject
                   onCreated={(entry) => {
                     void invalidate();
-                    setParams({ project: entry.id, view: 'sources' });
+                    setParams({ project: entry.id, view: 'files' });
                   }}
                 />
               ) : (
@@ -441,138 +518,116 @@ function Workspace({
         {project ? (
           <>
             {view === 'sources' ? (
-              <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,1fr)]">
-                <div className="flex min-w-0 flex-col gap-5">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>仓库来源</CardTitle>
-                      <CardDescription>
-                        同步指定分支的受限文本快照，原文无需模型即可搜索。二进制、LFS
-                        等跳过项见任务记录。
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      {bindings.isPending ? (
-                        <p role="status">正在读取来源…</p>
-                      ) : bindings.data?.length ? (
-                        <div className="flex flex-col gap-4">
-                          {bindings.data.map((binding) => (
-                            <BindingRow
-                              key={binding.id}
-                              binding={binding}
-                              runs={runs.data ?? []}
-                              owner={session.role === 'owner'}
-                              onChanged={invalidate}
-                            />
-                          ))}
-                        </div>
-                      ) : (
-                        <Empty>
-                          <FolderGit2 className="size-6" />
-                          <strong>还没有来源</strong>
-                          <p>添加一个可读取的 Git 仓库，再执行首次同步。</p>
-                        </Empty>
-                      )}
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>从文件到可信引用</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <ol className="flex flex-col gap-3 text-sm">
-                        <li>01 · 同步仓库，保存固定来源版本。</li>
-                        <li>
-                          02 · 搜索原文，或生成不调用模型的 Markdown 导航。
-                        </li>
-                        <li>03 · 打开精确 revision，复制引用供 Agent 使用。</li>
-                      </ol>
-                      <p className="mt-4 text-xs text-muted-foreground">
-                        当前切片不含 embedding、飞书、本地设备或外部发布。
-                      </p>
-                    </CardContent>
-                  </Card>
-                </div>
-                <div className="flex flex-col gap-5">
+              <section className="source-page">
+                <div className="section-toolbar">
+                  <div>
+                    <h2>已配置来源</h2>
+                    <p>插件将原文和加工产出发布到工作区。</p>
+                  </div>
                   {session.role === 'owner' ? (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>添加 Git 仓库</CardTitle>
-                        <CardDescription>
-                          首版只配置来源，不在浏览器执行 Git。
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent>
-                        <CreateBinding
-                          key={projectId}
-                          projectId={projectId}
-                          onCreated={() =>
-                            client.invalidateQueries({
-                              queryKey: [...scope, 'bindings'],
-                            })
-                          }
-                        />
-                      </CardContent>
-                    </Card>
+                    <Button onClick={() => setSourceDrawer(true)}>
+                      新增数据源
+                    </Button>
                   ) : null}
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>空间概览</CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <dl className="grid grid-cols-2 gap-4 text-sm">
-                        <div>
-                          <dt className="text-muted-foreground">来源</dt>
-                          <dd className="mt-1 text-xl font-semibold">
-                            {bindings.data?.length ?? '—'}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt className="text-muted-foreground">当前文件</dt>
-                          <dd className="mt-1 text-xl font-semibold">
-                            {tree.data ? files.length : '—'}
-                          </dd>
-                        </div>
-                      </dl>
-                      <p className="mt-4 break-all font-mono text-xs text-muted-foreground">
-                        head {short(project.head)}
-                      </p>
-                    </CardContent>
-                  </Card>
                 </div>
-              </div>
+                {bindings.isPending ? (
+                  <p role="status">正在读取来源…</p>
+                ) : bindings.data?.length ? (
+                  <div className="source-list">
+                    {bindings.data.map((binding) => (
+                      <BindingRow
+                        key={binding.id}
+                        binding={binding}
+                        runs={runs.data ?? []}
+                        owner={session.role === 'owner'}
+                        plugins={plugins.data ?? []}
+                        scope={scope}
+                        onChanged={invalidate}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <Empty>
+                    <FolderGit2 className="size-6" />
+                    <strong>还没有来源</strong>
+                    <p>添加 Git、会话导出或飞书群来源，然后同步文件。</p>
+                  </Empty>
+                )}
+                <p className="source-footer">
+                  head {short(project.head)} · {files.length} 个当前文件 ·
+                  自托管
+                </p>
+              </section>
+            ) : null}
+            {view === 'plugins' ? (
+              <section className="plugin-page">
+                <h2>已安装插件</h2>
+                <p>数据源与处理能力由本机已注册插件提供。</p>
+                {session.role !== 'owner' ? (
+                  <Empty>项目只读访问不提供插件配置。</Empty>
+                ) : plugins.isPending ? (
+                  <p role="status">正在读取插件…</p>
+                ) : (
+                  <div className="plugin-list">
+                    {plugins.data?.map((plugin) => (
+                      <Card key={plugin.packageRef}>
+                        <CardHeader>
+                          <CardTitle>{plugin.title}</CardTitle>
+                          <CardDescription>{plugin.packageRef}</CardDescription>
+                        </CardHeader>
+                      </Card>
+                    ))}
+                  </div>
+                )}
+              </section>
+            ) : null}
+            {sourceDrawer && project && session.role === 'owner' ? (
+              <SourceDialog onClose={() => setSourceDrawer(false)}>
+                <CreateBinding
+                  key={projectId}
+                  projectId={projectId}
+                  plugins={plugins.data ?? []}
+                  onCreated={() => {
+                    if (activeProject.current === projectId) {
+                      setSourceDrawer(false);
+                      setParams({ project: projectId, view: 'sources' });
+                    }
+                    return client.invalidateQueries({
+                      queryKey: [...scope, 'bindings'],
+                    });
+                  }}
+                />
+              </SourceDialog>
             ) : null}
             {view === 'files' ? (
-              <Card>
-                <CardHeader>
-                  <CardTitle>文件目录</CardTitle>
-                  <CardDescription>
-                    源文件与产物共同展示；已删除项不会留在当前目录。
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {tree.isPending ? (
-                    <p role="status">正在读取文件…</p>
-                  ) : files.length ? (
-                    <div className="flex flex-col divide-y">
-                      {files.map((file) => (
-                        <FileRow
-                          key={file.fileId}
-                          file={file}
-                          onOpen={() =>
-                            navigate({
-                              file: file.fileId,
-                              revision: file.revisionId,
-                            })
-                          }
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <Empty>尚无已发布文件。先从“来源”完成同步。</Empty>
-                  )}
-                </CardContent>
-              </Card>
+              <FileBrowser
+                files={files}
+                loading={tree.isPending}
+                onRefresh={() => void invalidate()}
+                onOpen={(file) =>
+                  navigate({
+                    dir: parentPath(file.logicalPath),
+                    file: file.fileId,
+                    revision: file.revisionId,
+                  })
+                }
+              >
+                {params.get('file') && params.get('revision') ? (
+                  <Reader
+                    key={`${projectId}:${params.get('file')}:${params.get('revision')}`}
+                    projectId={projectId}
+                    fileId={params.get('file')!}
+                    revisionId={params.get('revision')!}
+                    scope={scope}
+                    onClose={() => {
+                      const next = new URLSearchParams(params);
+                      next.delete('file');
+                      next.delete('revision');
+                      setParams(next);
+                    }}
+                  />
+                ) : null}
+              </FileBrowser>
             ) : null}
             {view === 'search' ? (
               <SearchPanel
@@ -582,6 +637,8 @@ function Workspace({
                 files={files}
                 onOpen={(file) =>
                   navigate({
+                    view: 'files',
+                    dir: parentPath(file.logicalPath),
                     file: file.fileId,
                     revision: file.revisionId,
                     q: params.get('q') ?? '',
@@ -608,6 +665,7 @@ function Workspace({
                         <RunRow
                           key={run.id}
                           run={run}
+                          plugins={plugins.data ?? []}
                           binding={bindings.data?.find(
                             (binding) => binding.id === run.bindingId,
                           )}
@@ -620,7 +678,9 @@ function Workspace({
                 </CardContent>
               </Card>
             ) : null}
-            {params.get('file') && params.get('revision') ? (
+            {view !== 'files' &&
+            params.get('file') &&
+            params.get('revision') ? (
               <Reader
                 key={`${projectId}:${params.get('file')}:${params.get('revision')}`}
                 projectId={projectId}
@@ -639,6 +699,72 @@ function Workspace({
         ) : null}
       </main>
     </div>
+  );
+}
+
+function SourceDialog({
+  children,
+  onClose,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const element = dialog.current;
+    const previousFocus = document.activeElement;
+    element?.showModal();
+    return () => {
+      element?.close();
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected)
+        previousFocus.focus();
+    };
+  }, []);
+  return (
+    <dialog
+      ref={dialog}
+      className="source-dialog"
+      aria-labelledby="source-dialog-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        dialog.current?.close();
+      }}
+      onClose={onClose}
+      onKeyDown={(event) => {
+        if (event.key !== 'Tab') return;
+        const controls = Array.from(
+          event.currentTarget.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((element) => element.getClientRects().length > 0);
+        const first = controls[0];
+        const last = controls.at(-1);
+        if (!first || !last) return;
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }}
+    >
+      <div className="dialog-heading">
+        <div>
+          <h2 id="source-dialog-title">添加来源</h2>
+          <p>选择来源插件，配置同步与处理能力。</p>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onClose}
+          aria-label="关闭添加来源"
+        >
+          <X />
+        </Button>
+      </div>
+      {children}
+    </dialog>
   );
 }
 
@@ -687,168 +813,6 @@ function CreateProject({
         </Button>
       </FieldGroup>
     </form>
-  );
-}
-
-function CreateBinding({
-  projectId,
-  onCreated,
-}: {
-  projectId: string;
-  onCreated: () => Promise<unknown>;
-}) {
-  const form = useForm<CreateBindingInput>({
-    defaultValues: { name: '', repoUrl: '', branch: 'main' },
-  });
-  const mutation = useMutation({
-    mutationFn: ({
-      projectId: targetProjectId,
-      values,
-    }: {
-      projectId: string;
-      values: CreateBindingInput;
-    }) =>
-      api<Binding>(
-        `/projects/${encodeURIComponent(targetProjectId)}/bindings`,
-        {
-          method: 'POST',
-          body: JSON.stringify(values),
-        },
-      ),
-    onSuccess: () => {
-      form.reset();
-      void onCreated();
-    },
-  });
-  return (
-    <form
-      onSubmit={form.handleSubmit(async (values) => {
-        if (await validateForm(CreateBindingSchema, values, form.setError))
-          mutation.mutate({ projectId, values });
-      })}
-    >
-      <FieldGroup>
-        {(
-          [
-            ['name', '来源名称', '例如：项目文档'],
-            ['repoUrl', '仓库地址', 'https://github.com/owner/repo.git'],
-            ['branch', '分支', 'main'],
-          ] as const
-        ).map(([name, label, placeholder]) => (
-          <Field key={name} data-invalid={Boolean(form.formState.errors[name])}>
-            <FieldLabel htmlFor={`binding-${name}`}>{label}</FieldLabel>
-            <Input
-              id={`binding-${name}`}
-              placeholder={placeholder}
-              spellCheck={false}
-              aria-invalid={Boolean(form.formState.errors[name])}
-              {...form.register(name)}
-            />
-            {form.formState.errors[name] ? (
-              <FieldDescription>
-                {form.formState.errors[name]?.message}
-              </FieldDescription>
-            ) : null}
-          </Field>
-        ))}
-        <FieldDescription>
-          仅使用服务器可读取的来源。请勿在 URL 中粘贴密码或 token。
-          切换空间会重置未提交的来源表单。
-        </FieldDescription>
-        {mutation.error ? <Alert>{errorText(mutation.error)}</Alert> : null}
-        <Button type="submit" disabled={mutation.isPending}>
-          <Plus />
-          {mutation.isPending ? '添加中…' : '添加来源'}
-        </Button>
-      </FieldGroup>
-    </form>
-  );
-}
-
-function BindingRow({
-  binding,
-  runs,
-  owner,
-  onChanged,
-}: {
-  binding: Binding;
-  runs: Run[];
-  owner: boolean;
-  onChanged: () => Promise<unknown>;
-}) {
-  const action = useMutation({
-    mutationFn: (kind: 'sync' | 'process') =>
-      api<Run>(
-        `/projects/${encodeURIComponent(binding.projectId)}/bindings/${encodeURIComponent(binding.id)}/${kind}`,
-        { method: 'POST' },
-      ),
-    onSuccess: () => {
-      void onChanged();
-    },
-  });
-  const activeRun = selectBindingRun(binding.id, runs, action.data);
-  const busy =
-    action.isPending ||
-    activeRun?.state === 'queued' ||
-    activeRun?.state === 'running';
-  return (
-    <article className="rounded-lg border p-4">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-medium">{binding.name}</h3>
-        <Badge>
-          {binding.lastError
-            ? '同步异常'
-            : binding.sourceVersion
-              ? '已有来源版本'
-              : '等待首次同步'}
-        </Badge>
-      </div>
-      <p className="break-all text-xs text-muted-foreground">
-        {binding.config.repoUrl}
-      </p>
-      <p className="mt-2 break-all font-mono text-xs text-muted-foreground">
-        {binding.config.branch} · {short(binding.sourceVersion)}
-      </p>
-      {binding.lastError ? (
-        <Alert className="mt-3">
-          上次同步未成功，保留最近一次已发布版本。请检查来源与任务记录。
-        </Alert>
-      ) : null}
-      {owner ? (
-        <div className="mt-4 flex flex-wrap gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => action.mutate('sync')}
-            disabled={busy}
-          >
-            <RefreshCw />
-            {action.isPending && action.variables === 'sync'
-              ? '同步中…'
-              : '同步仓库'}
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => action.mutate('process')}
-            disabled={busy || !binding.sourceVersion}
-          >
-            <BookOpen />
-            {action.isPending && action.variables === 'process'
-              ? '生成中…'
-              : '生成 Markdown 导航'}
-          </Button>
-        </div>
-      ) : null}
-      {action.error ? (
-        <Alert className="mt-3">{errorText(action.error)}</Alert>
-      ) : null}
-      {activeRun ? (
-        <p className="mt-3 text-xs text-muted-foreground" role="status">
-          任务状态：{runLabel(activeRun.state)}，可到“任务”查看记录。
-        </p>
-      ) : null}
-    </article>
   );
 }
 
@@ -1024,7 +988,7 @@ function SearchPanel({
                 <Empty>
                   {files.length
                     ? '当前范围没有匹配内容。可尝试 grep、更换关键词或检查来源与索引状态。'
-                    : '尚无可查询文件。先在“来源”同步仓库。'}
+                    : '尚无可查询文件。先在“来源”同步已配置的输入。'}
                 </Empty>
               )}
             </>
@@ -1055,6 +1019,7 @@ function Reader({
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [readerTab, setReaderTab] = useState('preview');
   const [copyError, setCopyError] = useState(false);
   const read = useQuery({
     queryKey: [...scope, 'read', fileId, revisionId],
@@ -1078,11 +1043,18 @@ function Reader({
     refetchOnWindowFocus: 'always',
   });
   return (
-    <Card className="mt-6" aria-label="固定版本原文">
+    <Card className="file-reader" aria-label="固定版本原文">
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <CardTitle>固定版本原文</CardTitle>
+            <CardTitle className="reader-title">
+              <FileText />
+              <span title={read.data?.file.logicalPath}>
+                {read.data
+                  ? baseName(read.data.file.logicalPath)
+                  : '固定版本原文'}
+              </span>
+            </CardTitle>
             <CardDescription className="mt-2 break-all">
               {(!read.error && read.data?.file.logicalPath) ||
                 '读取指定 revision'}
@@ -1092,7 +1064,42 @@ function Reader({
             关闭
           </Button>
         </div>
+        {read.data ? (
+          <div className="reader-summary">
+            <span className={'file-origin ' + read.data.file.ownership}>
+              {ownershipLabel(read.data.file)}
+            </span>
+            <span>
+              {read.data.file.ownership === 'generated'
+                ? '只读输出'
+                : '固定版本'}{' '}
+              ·{' '}
+              {read.data.file.freshness === 'fresh'
+                ? '有效'
+                : read.data.file.freshness === 'stale'
+                  ? '已过期'
+                  : '已失效'}
+            </span>
+          </div>
+        ) : null}
       </CardHeader>
+      <div className="reader-tabs" role="tablist" aria-label="文件详情">
+        {[
+          ['preview', '预览'],
+          ['version', '版本'],
+          ['source', '来源'],
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={readerTab === id}
+            onClick={() => setReaderTab(id!)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <CardContent>
         {read.isPending ? (
           <p role="status">正在读取版本…</p>
@@ -1104,11 +1111,82 @@ function Reader({
           </Alert>
         ) : read.data ? (
           <>
-            <dl className="mb-4 flex flex-col gap-1 break-all font-mono text-xs text-muted-foreground">
-              <div>revision {read.data.file.revisionId}</div>
-              <div>commit {read.data.citation.commitId}</div>
-              <div>source {read.data.citation.sourceVersion}</div>
-              <div>sha256 {read.data.citation.contentHash}</div>
+            {read.data.file.freshness !== 'fresh' ? (
+              <Alert className="mb-4">
+                {read.data.file.freshness === 'stale'
+                  ? read.data.file.collection === 'sources'
+                    ? '正在查看历史来源版本，仅供历史参考；请从文件目录打开最新来源。'
+                    : '此产物已过期，仅供历史参考；请从文件目录打开最新产物。'
+                  : '此文件已失效。不会自动替换成其他版本。'}
+              </Alert>
+            ) : null}
+            {readerTab === 'preview' ? (
+              <div className="markdown-preview">
+                {read.data.file.logicalPath.endsWith('.md') ? (
+                  <SafeMarkdown text={read.data.text} />
+                ) : (
+                  <pre>{read.data.text}</pre>
+                )}
+              </div>
+            ) : null}
+            {readerTab === 'version' ? (
+              <div className="version-details">
+                <h3>固定版本</h3>
+                <p>正在查看固定 revision，不会自动切换为最新版本。</p>
+                <dl>
+                  <dt>文件 ID</dt>
+                  <dd>{read.data.file.fileId}</dd>
+                  <dt>revision</dt>
+                  <dd>{read.data.file.revisionId}</dd>
+                  <dt>commit</dt>
+                  <dd>{read.data.citation.commitId}</dd>
+                  <dt>source</dt>
+                  <dd>{read.data.citation.sourceVersion}</dd>
+                  <dt>sha256</dt>
+                  <dd>{read.data.citation.contentHash}</dd>
+                </dl>
+                <p>当前 API 提供精确版本读取，尚未提供历史版本列表。</p>
+              </div>
+            ) : null}
+            {readerTab === 'source' ? (
+              <div className="version-details">
+                <h3>来源与派生关系</h3>
+                <dl>
+                  <dt>来源绑定</dt>
+                  <dd>{read.data.file.bindingId}</dd>
+                  <dt>来源版本</dt>
+                  <dd>{read.data.file.sourceVersion}</dd>
+                  <dt>所有权</dt>
+                  <dd>{read.data.file.ownership}</dd>
+                </dl>
+                {read.data.file.derivedFrom.length ? (
+                  read.data.file.derivedFrom.map((source) => (
+                    <Link
+                      className="lineage-link"
+                      key={source.fileId + source.revisionId}
+                      to={`/?${new URLSearchParams({ project: projectId, view: 'files', file: source.fileId, revision: source.revisionId })}`}
+                    >
+                      原始文件 {source.fileId}
+                      <span>revision {source.revisionId}</span>
+                    </Link>
+                  ))
+                ) : (
+                  <p>这是来源文件，没有派生输入。</p>
+                )}
+                <p>按当前空间权限读取；来源撤销后固定引用停止返回正文。</p>
+              </div>
+            ) : null}
+            <dl className="reader-metadata">
+              <dt>文件路径</dt>
+              <dd>{read.data.file.logicalPath}</dd>
+              <dt>文件大小</dt>
+              <dd>{read.data.file.bytes} bytes</dd>
+              <dt>修改时间</dt>
+              <dd>
+                {new Date(read.data.file.createdAt).toLocaleString('zh-CN')}
+              </dd>
+              <dt>固定版本</dt>
+              <dd>rev {short(read.data.file.revisionId)}</dd>
             </dl>
             <Button
               variant="outline"
@@ -1143,9 +1221,10 @@ function Reader({
             <p className="mt-3 break-all font-mono text-xs text-muted-foreground">
               {read.data.citation.uri}
             </p>
-            <pre className="mt-5 max-h-[38rem] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-4 text-sm leading-7">
-              {read.data.text}
-            </pre>
+            <details className="raw-text">
+              <summary>查看原始文本</summary>
+              <pre>{read.data.text}</pre>
+            </details>
           </>
         ) : null}
       </CardContent>
@@ -1153,21 +1232,63 @@ function Reader({
   );
 }
 
-function runLabel(state: Run['state']) {
-  return {
-    queued: '等待执行',
-    running: '执行中',
-    published: '内容已发布',
-    failed: '执行失败',
-    superseded: '输入已更新',
-  }[state];
+function SafeMarkdown({ text }: { text: string }) {
+  // Deliberately support only inert text structure: no raw HTML, URL, or executable content.
+  let inCode = false;
+  return (
+    <>
+      {text.split('\n').map((line, index) => {
+        if (line.startsWith('```')) {
+          inCode = !inCode;
+          return (
+            <div key={index} className="code-delimiter">
+              {line}
+            </div>
+          );
+        }
+        if (inCode)
+          return (
+            <div className="markdown-code" key={index}>
+              {line || '\u00a0'}
+            </div>
+          );
+        if (line.startsWith('### '))
+          return <h4 key={index}>{line.slice(4)}</h4>;
+        if (line.startsWith('## ')) return <h3 key={index}>{line.slice(3)}</h3>;
+        if (line.startsWith('# ')) return <h2 key={index}>{line.slice(2)}</h2>;
+        if (/^[-*] /.test(line))
+          return (
+            <p className="markdown-list" key={index}>
+              • {line.slice(2)}
+            </p>
+          );
+        return line ? (
+          <p key={index}>{line}</p>
+        ) : (
+          <div className="markdown-space" key={index} />
+        );
+      })}
+    </>
+  );
 }
-function RunRow({ run, binding }: { run: Run; binding: Binding | undefined }) {
+
+function RunRow({
+  run,
+  binding,
+  plugins,
+}: {
+  run: Run;
+  binding: Binding | undefined;
+  plugins: PluginDescriptor[];
+}) {
+  const processor = plugins.find(
+    (plugin) => plugin.packageRef === binding?.processor?.packageRef,
+  );
   return (
     <article className="flex flex-col gap-2 py-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-medium">
-          {run.kind === 'sync' ? '仓库同步' : 'Markdown 导航加工'}
+          {run.kind === 'sync' ? '来源同步' : (processor?.title ?? '插件加工')}
         </h3>
         <Badge>{runLabel(run.state)}</Badge>
       </div>
@@ -1184,8 +1305,8 @@ function RunRow({ run, binding }: { run: Run; binding: Binding | undefined }) {
             {binding?.name ?? '来源任务'}：{run.error}。
           </p>
           <p>
-            最近已发布内容仍保留。请检查仓库地址、分支、网络及权限；本切片不支持私有
-            Git 凭据。分支填错时请重新添加正确来源。
+            最近已发布内容仍保留。请检查插件配置、导入文件、仓库地址/分支、网络及权限；本切片不支持私有
+            Git 凭据。来源配置填错时请重新添加正确来源。
           </p>
           <Link
             className="underline"

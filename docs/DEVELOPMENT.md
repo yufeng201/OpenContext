@@ -1,6 +1,6 @@
 # 开发与验证
 
-状态：工程 harness 已落地；首条业务切片已实现，范围见[实施状态](IMPLEMENTATION_STATUS.md)。本指南面向开发者，产品部署步骤见 [USER_JOURNEYS](USER_JOURNEYS.md)。先读仓库根 AGENTS.md；技术基线见 [ADR](adr/0001-engineering-baseline.md)。
+状态：工程 harness 已落地；首条业务切片已实现，范围见[实施状态](IMPLEMENTATION_STATUS.md)。本指南面向开发者，当前可执行启动步骤见[快速开始](QUICKSTART.md)；[USER_JOURNEYS](USER_JOURNEYS.md)是完整产品目标，不能用其拟议命令安装当前版本。先读仓库根 AGENTS.md；技术基线见 [ADR](adr/0001-engineering-baseline.md)。
 
 ## 安装与唯一检查入口
 
@@ -46,3 +46,7 @@ CI 执行相同两条命令；工作流文件仅提供配置，不代表已在 G
 每个开发任务固定范围、对应 RF/AC/UJ、输入输出契约和成功/失败用例。先完成 [P1-001 repo→recall](tasks/P1-001-repo-recall.md)，不一次建设所有插件实现、飞书或复杂 UI。改契约同时改配置、类型与规则 fixture；变更数据库、ACL、CAS、输出保护时必须在实现层增加集成/故障注入，不能仅靠本指南或 prompt。
 
 提交审查材料包含改了什么、真实执行命令、失败与未覆盖项、数据迁移风险。commit/push 需用户明确授权；不能据开发授权创建凭据或调用真实用户资源。测试只用临时目录/合成 repo、文档和设备；外部模型、发布和生产数据需另行明确授权。
+
+## 飞书模拟开发入口
+
+安装并构建后，`node scripts/feishu-fixture-server.ts`使用临时目录、loopback 4534及合成token启动真实API/Web/MCP；飞书请求由注入fetch返回合成官方响应，绝不连接真实群。配置与首条成功步骤见[飞书指南](FEISHU_CHAT.md)。真实接入使用私有owner和服务器secretRef映射；公开demo模式检测到飞书token即拒绝启动。已确认plugin-state是联合备份的一部分，忽略规则覆盖该目录；不要为重置测试而删除非本次创建的数据。

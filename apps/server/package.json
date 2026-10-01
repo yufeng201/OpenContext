@@ -10,12 +10,18 @@
     "fastify": "5.12.5",
     "@opencontext/contracts": "workspace:*",
     "@opencontext/plugin-sdk": "workspace:*",
+    "@opencontext/plugin-host": "workspace:*",
+    "@sinclair/typebox": "0.34.52",
     "@opencontext/core": "workspace:*",
     "@opencontext/storage-fs": "workspace:*",
     "@opencontext/state-sqlite": "workspace:*",
     "@opencontext/retrieval": "workspace:*",
     "@opencontext/mcp": "workspace:*",
     "@opencontext/repo-connector": "workspace:*",
-    "@opencontext/markdown-processor": "workspace:*"
+    "@opencontext/markdown-processor": "workspace:*",
+    "@opencontext/session-connector": "workspace:*",
+    "@opencontext/session-candidates": "workspace:*",
+    "@opencontext/feishu-chat": "workspace:*",
+    "@opencontext/feishu-chat-analysis": "workspace:*"
   }
 }

@@ -31,7 +31,11 @@ export function violations(path: string, source: string): string[] {
     let forbidden = false;
     if (from === 'apps/web')
       forbidden =
-        isBuiltin(target) ||
+        (isBuiltin(target) &&
+          !(
+            /^apps\/web\/tests\/[^/]+\.spec\.ts$/.test(path) &&
+            ['node:fs', 'node:fs/promises'].includes(target)
+          )) ||
         /^(better-sqlite3|fastify|@fastify\/)/.test(target) ||
         (internal && to !== from && to !== 'packages/contracts');
     if (from === 'packages/core')

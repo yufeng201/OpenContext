@@ -4,13 +4,16 @@ import {
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type {
   Binding,
-  CreateBindingInput,
+  ExecutionLock,
   FileEntry,
+  ImportedObjectRef,
+  PluginInstanceLock,
+  PreparedBinding,
   Principal,
   Project,
   Run,
@@ -26,6 +29,7 @@ type PublishInput = {
   run: Run;
   sourceVersion?: string;
 };
+export type CatalogOptions = { mode: 'demo' | 'private' };
 
 const LEASE_MS = 90_000;
 const digest = (value: string): string =>
@@ -41,15 +45,136 @@ function nullable(row: Row, key: string): string | null {
   return row[key] === null ? null : str(row, key);
 }
 
+function isBusy(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    'errcode' in error &&
+    typeof error.errcode === 'number' &&
+    [5, 6].includes(error.errcode & 255)
+  );
+}
+
+function canonicalDatabasePath(dbPath: string): string {
+  const absolute = resolve(dbPath);
+  mkdirSync(dirname(absolute), { recursive: true });
+  return existsSync(absolute)
+    ? realpathSync(absolute)
+    : join(realpathSync(dirname(absolute)), basename(absolute));
+}
+
+function checkedBinding(input: PreparedBinding): PreparedBinding {
+  if (
+    !input ||
+    typeof input.name !== 'string' ||
+    !input.name.trim() ||
+    input.name.length > 80
+  )
+    throw new Error('INVALID_BINDING');
+  const checked = (
+    lock: PluginInstanceLock,
+    capability: PluginInstanceLock['capability'],
+  ): PluginInstanceLock => {
+    if (
+      !lock ||
+      lock.capability !== capability ||
+      typeof lock.ref !== 'string' ||
+      !lock.ref ||
+      lock.ref.length > 200 ||
+      typeof lock.packageRef !== 'string' ||
+      !lock.packageRef ||
+      lock.packageRef.length > 200 ||
+      typeof lock.packageDigest !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(lock.packageDigest) ||
+      typeof lock.configHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(lock.configHash) ||
+      !lock.config ||
+      typeof lock.config !== 'object' ||
+      Array.isArray(lock.config)
+    )
+      throw new Error('INVALID_PLUGIN_LOCK');
+    // The host owns package/config schema and digest verification. Persist only
+    // a JSON value copy here so the caller cannot mutate an installed binding.
+    try {
+      return JSON.parse(
+        JSON.stringify(
+          {
+            ref: lock.ref,
+            packageRef: lock.packageRef,
+            packageDigest: lock.packageDigest,
+            configHash: lock.configHash,
+            capability,
+            config: lock.config,
+          },
+          (_key, value: unknown) => {
+            if (
+              typeof value === 'undefined' ||
+              typeof value === 'function' ||
+              typeof value === 'symbol' ||
+              typeof value === 'bigint' ||
+              (typeof value === 'number' && !Number.isFinite(value))
+            )
+              throw new Error('INVALID_PLUGIN_LOCK');
+            return value;
+          },
+        ),
+      ) as PluginInstanceLock;
+    } catch {
+      throw new Error('INVALID_PLUGIN_LOCK');
+    }
+  };
+  return {
+    name: input.name,
+    connector: checked(input.connector, 'connector'),
+    processor: checked(input.processor, 'processor'),
+  };
+}
+
 /** One local authority. Plugins never receive this object or its database. */
 export class Catalog {
   readonly db: DatabaseSync;
   readonly incarnation = randomUUID();
+  private authorityLock: DatabaseSync | undefined;
+  private databaseClosed = false;
 
-  constructor(dbPath: string) {
-    if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSync(dbPath);
-    this.db.exec(`
+  constructor(dbPath: string, options: CatalogOptions = { mode: 'private' }) {
+    if (options.mode !== 'demo' && options.mode !== 'private')
+      throw new Error('INVALID_DATA_MODE');
+    const path = dbPath === ':memory:' ? dbPath : canonicalDatabasePath(dbPath);
+    // This separate connection holds the SQLite OS lock for the entire Catalog
+    // lifetime. Control-db transactions remain short and independent. Never
+    // unlink this file to "recover" authority: process death releases its lock.
+    if (path !== ':memory:') {
+      const authority = new DatabaseSync(`${path}.authority.sqlite`);
+      try {
+        authority.exec('PRAGMA busy_timeout=0; BEGIN EXCLUSIVE');
+        this.authorityLock = authority;
+      } catch (error) {
+        authority.close();
+        if (isBusy(error)) throw new Error('CATALOG_IN_USE', { cause: error });
+        throw error;
+      }
+    }
+    let control: DatabaseSync | undefined;
+    try {
+      this.db = control = new DatabaseSync(path);
+      // Inspect before any control-db PRAGMA that writes, schema migration,
+      // incarnation replacement, or abandoned-run recovery. Legacy databases
+      // are private regardless of whether they contain projects or user files.
+      const tables = this.db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .all();
+      const savedMode = tables.some((table) => table.name === 'catalog_meta')
+        ? this.db
+            .prepare(
+              "SELECT value FROM catalog_meta WHERE key='deployment_mode'",
+            )
+            .get()?.value
+        : undefined;
+      const mode = savedMode ?? (tables.length > 0 ? 'private' : options.mode);
+      if (mode !== options.mode) throw new Error('DATA_MODE_MISMATCH');
+      this.db.exec(`
       PRAGMA foreign_keys = ON;
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -65,6 +190,8 @@ export class Catalog {
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
         name TEXT NOT NULL, instance_ref TEXT NOT NULL UNIQUE,
         package_ref TEXT NOT NULL, config_json TEXT NOT NULL CHECK(json_valid(config_json)),
+        connector_json TEXT CHECK(connector_json IS NULL OR json_valid(connector_json)),
+        processor_json TEXT CHECK(processor_json IS NULL OR json_valid(processor_json)),
         active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
         source_version TEXT, last_error TEXT, UNIQUE(project_id,id)
       ) STRICT;
@@ -76,6 +203,7 @@ export class Catalog {
         incarnation TEXT NOT NULL, lease_until INTEGER,
         input_commit TEXT, result_commit TEXT, error TEXT, created_at TEXT NOT NULL,
         skipped_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skipped_json)),
+        execution_json TEXT CHECK(execution_json IS NULL OR json_valid(execution_json)),
         FOREIGN KEY(project_id,binding_id) REFERENCES bindings(project_id,id)
       ) STRICT;
       CREATE UNIQUE INDEX IF NOT EXISTS one_active_run
@@ -113,35 +241,92 @@ export class Catalog {
         project_id TEXT NOT NULL REFERENCES projects(id),
         revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1))
       ) STRICT;
+      CREATE TABLE IF NOT EXISTS binding_imports (
+        binding_id TEXT NOT NULL REFERENCES bindings(id), id TEXT NOT NULL,
+        filename TEXT NOT NULL, content_hash TEXT NOT NULL,
+        bytes INTEGER NOT NULL CHECK(bytes>=0),
+        active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+        PRIMARY KEY(binding_id,id)
+      ) STRICT;
+      CREATE UNIQUE INDEX IF NOT EXISTS one_current_import_filename
+        ON binding_imports(binding_id,filename) WHERE active=1;
     `);
-    this.transaction(() => {
-      if (
-        !this.db
-          .prepare('PRAGMA table_info(runs)')
-          .all()
-          .some((column) => column.name === 'skipped_json')
-      ) {
-        this.db.exec(
-          "ALTER TABLE runs ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skipped_json))",
-        );
+      this.transaction(() => {
+        this.db
+          .prepare(
+            "INSERT INTO catalog_meta(key,value) VALUES('deployment_mode',?) ON CONFLICT(key) DO NOTHING",
+          )
+          .run(options.mode);
+        if (
+          !this.db
+            .prepare('PRAGMA table_info(runs)')
+            .all()
+            .some((column) => column.name === 'skipped_json')
+        ) {
+          this.db.exec(
+            "ALTER TABLE runs ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skipped_json))",
+          );
+        }
+        const bindingColumns = this.db
+          .prepare('PRAGMA table_info(bindings)')
+          .all();
+        for (const column of ['connector_json', 'processor_json']) {
+          if (!bindingColumns.some((item) => item.name === column)) {
+            // The interpolated identifier is exclusively this fixed internal list.
+            this.db.exec(
+              `ALTER TABLE bindings ADD COLUMN ${column} TEXT CHECK(${column} IS NULL OR json_valid(${column}))`,
+            );
+          }
+        }
+        if (
+          !this.db
+            .prepare('PRAGMA table_info(runs)')
+            .all()
+            .some((column) => column.name === 'execution_json')
+        ) {
+          this.db.exec(
+            'ALTER TABLE runs ADD COLUMN execution_json TEXT CHECK(execution_json IS NULL OR json_valid(execution_json))',
+          );
+        }
+        this.rejectLegacyRuns();
+        this.db
+          .prepare(
+            "INSERT INTO catalog_meta(key,value) VALUES('incarnation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+          )
+          .run(this.incarnation);
+        // A recovered process cannot reuse a previous server's lease, even when a
+        // restored backup contains the same fencing counter.
+        this.db
+          .prepare(
+            "UPDATE runs SET state='queued', lease_until=NULL WHERE state='running'",
+          )
+          .run();
+      });
+    } catch (error) {
+      try {
+        control?.close();
+      } finally {
+        this.releaseAuthority();
       }
-      this.db
-        .prepare(
-          "INSERT INTO catalog_meta(key,value) VALUES('incarnation',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        )
-        .run(this.incarnation);
-      // A recovered process cannot reuse a previous server's lease, even when a
-      // restored backup contains the same fencing counter.
-      this.db
-        .prepare(
-          "UPDATE runs SET state='queued', lease_until=NULL WHERE state='running'",
-        )
-        .run();
-    });
+      throw error;
+    }
   }
 
   close(): void {
-    this.db.close();
+    if (!this.databaseClosed) {
+      this.db.close();
+      this.databaseClosed = true;
+    }
+    this.releaseAuthority();
+  }
+
+  private releaseAuthority(): void {
+    if (this.authorityLock) {
+      // Closing the SQLite connection rolls back BEGIN EXCLUSIVE and releases
+      // OS locks. The file remains in place for all future processes.
+      this.authorityLock.close();
+      this.authorityLock = undefined;
+    }
   }
 
   private transaction<T>(operation: () => T): T {
@@ -161,12 +346,7 @@ export class Catalog {
           // retain the original error rather than hiding it with ROLLBACK.
         }
       }
-      if (
-        error instanceof Error &&
-        'errcode' in error &&
-        typeof error.errcode === 'number' &&
-        [5, 6].includes(error.errcode & 255)
-      ) {
+      if (isBusy(error)) {
         throw new Error('BUSY', { cause: error });
       }
       throw error;
@@ -215,23 +395,63 @@ export class Catalog {
     };
   }
 
-  createBinding(projectId: string, input: CreateBindingInput): Binding {
+  createBinding(projectId: string, input: PreparedBinding): Binding {
     this.assertAuthority();
     if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
+    const prepared = checkedBinding(input);
     const id = randomUUID();
     this.db
       .prepare(
-        'INSERT INTO bindings(id,project_id,name,instance_ref,package_ref,config_json) VALUES(?,?,?,?,?,?)',
+        'INSERT INTO bindings(id,project_id,name,instance_ref,package_ref,config_json,connector_json,processor_json) VALUES(?,?,?,?,?,?,?,?)',
       )
       .run(
         id,
         projectId,
-        input.name,
-        `git-${id}@1`,
-        'org.opencontext.repo@0.1.0',
-        JSON.stringify({ repoUrl: input.repoUrl, branch: input.branch }),
+        prepared.name,
+        prepared.connector.ref,
+        prepared.connector.packageRef,
+        JSON.stringify(prepared.connector.config),
+        JSON.stringify(prepared.connector),
+        JSON.stringify(prepared.processor),
       );
     return this.getBinding(id)!;
+  }
+
+  /** Composition-root resolver is synchronous and must perform no network I/O. */
+  migrateLegacyBindings(resolver: (binding: Binding) => PreparedBinding): void {
+    this.transaction(() => {
+      this.assertAuthority();
+      this.rejectLegacyRuns();
+      const legacy = this.db
+        .prepare(
+          'SELECT * FROM bindings WHERE connector_json IS NULL OR processor_json IS NULL ORDER BY id',
+        )
+        .all();
+      for (const row of legacy) {
+        const prepared = checkedBinding(resolver(this.binding(row)));
+        this.db
+          .prepare(
+            'UPDATE bindings SET name=?,instance_ref=?,package_ref=?,config_json=?,connector_json=?,processor_json=? WHERE id=?',
+          )
+          .run(
+            prepared.name,
+            prepared.connector.ref,
+            prepared.connector.packageRef,
+            JSON.stringify(prepared.connector.config),
+            JSON.stringify(prepared.connector),
+            JSON.stringify(prepared.processor),
+            str(row, 'id'),
+          );
+      }
+    });
+  }
+
+  private rejectLegacyRuns(): void {
+    this.db
+      .prepare(
+        "UPDATE runs SET state='failed',error='LEGACY_RUN_REQUIRES_RETRY',lease_until=NULL WHERE state IN ('queued','running') AND execution_json IS NULL",
+      )
+      .run();
   }
 
   getBinding(id: string): Binding | null {
@@ -247,17 +467,146 @@ export class Catalog {
   }
 
   private binding(row: Row): Binding {
+    const connector =
+      row.connector_json === null
+        ? null
+        : (JSON.parse(str(row, 'connector_json')) as PluginInstanceLock);
+    const processor =
+      row.processor_json === null
+        ? null
+        : (JSON.parse(str(row, 'processor_json')) as PluginInstanceLock);
     return {
       id: str(row, 'id'),
       projectId: str(row, 'project_id'),
       name: str(row, 'name'),
-      instanceRef: str(row, 'instance_ref'),
-      packageRef: str(row, 'package_ref'),
-      config: JSON.parse(str(row, 'config_json')) as Binding['config'],
+      instanceRef: connector?.ref ?? str(row, 'instance_ref'),
+      packageRef: connector?.packageRef ?? str(row, 'package_ref'),
+      config:
+        connector?.config ??
+        (JSON.parse(str(row, 'config_json')) as Binding['config']),
+      connector,
+      processor,
       active: row.active === 1,
       sourceVersion: nullable(row, 'source_version'),
       lastError: nullable(row, 'last_error'),
     };
+  }
+
+  private activeBinding(id: string): Binding {
+    const binding = this.getBinding(id);
+    if (!binding) throw new Error('NOT_FOUND');
+    if (!binding.active) throw new Error('BINDING_REVOKED');
+    return binding;
+  }
+
+  putImport(
+    bindingId: string,
+    object: ImportedObjectRef,
+    expectedObjectId: string | null = null,
+  ): ImportedObjectRef {
+    return this.transaction(() => {
+      this.assertAuthority();
+      this.activeBinding(bindingId);
+      if (
+        !object ||
+        typeof object.id !== 'string' ||
+        !object.id ||
+        object.id.length > 120 ||
+        typeof object.filename !== 'string' ||
+        !object.filename ||
+        object.filename.length > 255 ||
+        /[/\\\0]/.test(object.filename) ||
+        ['.', '..'].includes(object.filename) ||
+        typeof object.contentHash !== 'string' ||
+        !/^[a-f0-9]{64}$/.test(object.contentHash) ||
+        !Number.isSafeInteger(object.bytes) ||
+        object.bytes < 0
+      )
+        throw new Error('INVALID_IMPORT');
+      const current = this.listImports(bindingId).find(
+        (item) => item.filename === object.filename,
+      );
+      if (current?.contentHash === object.contentHash) {
+        if (current.bytes !== object.bytes) throw new Error('INVALID_IMPORT');
+        return current;
+      }
+      if ((current?.id ?? null) !== expectedObjectId)
+        throw new Error('IMPORT_CONFLICT');
+      const totals = this.db
+        .prepare(
+          'SELECT count(*) AS count,coalesce(sum(bytes),0) AS bytes FROM binding_imports WHERE binding_id=? AND active=1 AND filename<>?',
+        )
+        .get(bindingId, object.filename)!;
+      if (
+        Number(totals.count) + 1 > 32 ||
+        Number(totals.bytes) + object.bytes > 10 * 1024 * 1024
+      )
+        throw new Error('IMPORT_LIMIT');
+      const old = this.db
+        .prepare(
+          'SELECT filename,content_hash,bytes FROM binding_imports WHERE binding_id=? AND id=?',
+        )
+        .get(bindingId, object.id);
+      if (
+        old &&
+        (old.filename !== object.filename ||
+          old.content_hash !== object.contentHash ||
+          old.bytes !== object.bytes)
+      )
+        throw new Error('IMPORT_ID_COLLISION');
+      // Retain replaced/removed object metadata; frozen runs continue to refer
+      // to the original blob. Only the current filename selector changes.
+      this.db
+        .prepare(
+          'UPDATE binding_imports SET active=0 WHERE binding_id=? AND filename=?',
+        )
+        .run(bindingId, object.filename);
+      this.db
+        .prepare(
+          'INSERT INTO binding_imports(binding_id,id,filename,content_hash,bytes) VALUES(?,?,?,?,?) ON CONFLICT(binding_id,id) DO UPDATE SET active=1',
+        )
+        .run(
+          bindingId,
+          object.id,
+          object.filename,
+          object.contentHash,
+          object.bytes,
+        );
+      return {
+        id: object.id,
+        filename: object.filename,
+        contentHash: object.contentHash,
+        bytes: object.bytes,
+      };
+    });
+  }
+
+  listImports(bindingId: string): ImportedObjectRef[] {
+    this.activeBinding(bindingId);
+    return this.db
+      .prepare(
+        'SELECT id,filename,content_hash,bytes FROM binding_imports WHERE binding_id=? AND active=1 ORDER BY filename,id',
+      )
+      .all(bindingId)
+      .map((row) => ({
+        id: str(row, 'id'),
+        filename: str(row, 'filename'),
+        contentHash: str(row, 'content_hash'),
+        bytes: Number(row.bytes),
+      }));
+  }
+
+  removeImport(bindingId: string, id: string): void {
+    this.transaction(() => {
+      this.assertAuthority();
+      this.activeBinding(bindingId);
+      const removed = this.db
+        .prepare(
+          'UPDATE binding_imports SET active=0 WHERE binding_id=? AND id=? AND active=1',
+        )
+        .run(bindingId, id);
+      if (removed.changes !== 1) throw new Error('NOT_FOUND');
+    });
   }
 
   createReaderToken(projectId: string): { id: string; token: string } {
@@ -307,19 +656,24 @@ export class Catalog {
   enqueue(bindingId: string, kind: Run['kind']): Run {
     return this.transaction(() => {
       this.assertAuthority();
-      const binding = this.getBinding(bindingId);
-      if (!binding) throw new Error('NOT_FOUND');
-      if (!binding.active) throw new Error('BINDING_REVOKED');
+      const binding = this.activeBinding(bindingId);
+      const instance = kind === 'sync' ? binding.connector : binding.processor;
+      if (!instance) throw new Error('LEGACY_BINDING_REQUIRES_MIGRATION');
+      this.rejectLegacyRuns();
       const existing = this.db
         .prepare(
           "SELECT * FROM runs WHERE binding_id=? AND kind=? AND state IN ('queued','running')",
         )
         .get(bindingId, kind);
       if (existing) return this.run(existing);
+      const execution: ExecutionLock = {
+        instance,
+        imports: this.listImports(bindingId),
+      };
       const id = randomUUID();
       this.db
         .prepare(
-          "INSERT INTO runs(id,project_id,binding_id,kind,state,incarnation,input_commit,created_at) VALUES(?,?,?,?,'queued',?,?,?)",
+          "INSERT INTO runs(id,project_id,binding_id,kind,state,incarnation,input_commit,created_at,execution_json) VALUES(?,?,?,?,'queued',?,?,?,?)",
         )
         .run(
           id,
@@ -329,6 +683,7 @@ export class Catalog {
           this.incarnation,
           this.head(binding.projectId),
           new Date().toISOString(),
+          JSON.stringify(execution),
         );
       return this.getRun(id)!;
     });
@@ -365,12 +720,17 @@ export class Catalog {
         path: string;
         reason: string;
       }[],
+      execution:
+        row.execution_json === null
+          ? null
+          : (JSON.parse(str(row, 'execution_json')) as ExecutionLock),
     };
   }
 
   claim(): Run | null {
     return this.transaction(() => {
       this.assertAuthority();
+      this.rejectLegacyRuns();
       const now = Date.now();
       const row = this.db
         .prepare(
@@ -434,6 +794,16 @@ export class Catalog {
     )
       throw new Error('LEASE_LOST');
     return this.run(row);
+  }
+
+  private assertSyncInputs(run: Run): void {
+    if (!run.execution) throw new Error('LEGACY_RUN_REQUIRES_RETRY');
+    if (
+      run.kind === 'sync' &&
+      JSON.stringify(this.listImports(run.bindingId)) !==
+        JSON.stringify(run.execution.imports)
+    )
+      throw new Error('INPUT_CHANGED');
   }
 
   failRun(run: Run, error: string): void {
@@ -528,7 +898,7 @@ export class Catalog {
     this.transaction(() => {
       if (input.projectId !== input.run.projectId) throw new Error('NOT_FOUND');
       if (this.alreadyPublished(input.run, input.commitId)) return;
-      this.activeAttempt(input.run);
+      this.assertSyncInputs(this.activeAttempt(input.run));
       if (this.head(input.projectId) !== input.expectedHead)
         throw new Error('HEAD_MOVED');
       if (!/^[a-f0-9]{64}$/.test(input.manifestHash))
@@ -644,7 +1014,7 @@ export class Catalog {
   completeNoop(run: Run, head: string | null, sourceVersion?: string): void {
     this.transaction(() => {
       if (this.alreadyPublished(run, head)) return;
-      this.activeAttempt(run);
+      this.assertSyncInputs(this.activeAttempt(run));
       if (this.head(run.projectId) !== head) throw new Error('HEAD_MOVED');
       this.finish(run, head, sourceVersion);
     });

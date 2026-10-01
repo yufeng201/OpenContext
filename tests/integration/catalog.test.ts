@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -7,12 +14,84 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type {
   Binding,
   FileEntry,
+  ImportedObjectRef,
+  PreparedBinding,
   Run,
 } from '../../packages/contracts/src/index.ts';
 import { Catalog } from '../../packages/state-sqlite/src/index.ts';
 
 const open = new Set<Catalog>();
 const temporaryRoots: string[] = [];
+const catalogModule = new URL(
+  '../../packages/state-sqlite/src/index.ts',
+  import.meta.url,
+).href;
+
+function preparedBinding(name = 'Synthetic connector'): PreparedBinding {
+  return {
+    name,
+    connector: {
+      ref: `connector-${randomUUID()}@1`,
+      packageRef: 'test.connector@1.0.0',
+      packageDigest: 'c'.repeat(64),
+      configHash: 'd'.repeat(64),
+      capability: 'connector',
+      config: { fixture: true },
+    },
+    processor: {
+      ref: `processor-${randomUUID()}@1`,
+      packageRef: 'test.processor@1.0.0',
+      packageDigest: 'e'.repeat(64),
+      configHash: 'f'.repeat(64),
+      capability: 'processor',
+      config: { heading: 'Synthetic output' },
+    },
+  };
+}
+
+function imported(
+  filename = 'conversation.json',
+  overrides: Partial<ImportedObjectRef> = {},
+): ImportedObjectRef {
+  return {
+    id: randomUUID(),
+    filename,
+    contentHash: 'a'.repeat(64),
+    bytes: 30,
+    ...overrides,
+  };
+}
+
+async function childMessage(
+  child: ChildProcess,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error('CHILD_START_TIMEOUT')),
+      5000,
+    );
+    child.once('message', (message) => {
+      clearTimeout(timeout);
+      resolve(message as Record<string, unknown>);
+    });
+    child.once('error', (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`CHILD_EXIT_${code}`));
+    });
+  });
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    child.once('exit', () => resolve());
+    child.kill('SIGKILL');
+  });
+}
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'opencontext-catalog-'));
@@ -21,11 +100,7 @@ function fixture() {
   const catalog = new Catalog(dbPath);
   open.add(catalog);
   const project = catalog.createProject('Synthetic project');
-  const binding = catalog.createBinding(project.id, {
-    name: 'Synthetic repository',
-    repoUrl: '/synthetic/repo',
-    branch: 'main',
-  });
+  const binding = catalog.createBinding(project.id, preparedBinding());
   return { catalog, project, binding, dbPath };
 }
 
@@ -89,6 +164,284 @@ afterEach(() => {
 });
 
 describe('SQLite authority with synthetic local data', () => {
+  it('validates and persists generic package/config locks without treating legacy aliases as authority', () => {
+    const { catalog, project } = fixture();
+    const prepared = preparedBinding('Conversation imports');
+    const binding = catalog.createBinding(project.id, prepared);
+    const original = JSON.parse(JSON.stringify(prepared)) as PreparedBinding;
+    prepared.connector.config.fixture = false;
+    binding.connector!.config.fixture = 'caller mutation';
+    catalog.db
+      .prepare(
+        'UPDATE bindings SET instance_ref=?,package_ref=?,config_json=? WHERE id=?',
+      )
+      .run('legacy-ignored@1', 'legacy.ignored@0.0.0', '{}', binding.id);
+    const stored = catalog.getBinding(binding.id)!;
+    expect(stored.connector).toEqual(original.connector);
+    expect(stored.processor).toEqual(original.processor);
+    expect(stored.instanceRef).toBe(original.connector.ref);
+    expect(stored.packageRef).toBe(original.connector.packageRef);
+    expect(stored.config).toEqual(original.connector.config);
+    expect(() =>
+      catalog.createBinding(project.id, { ...preparedBinding(), name: ' ' }),
+    ).toThrow('INVALID_BINDING');
+    const wrongCapability = preparedBinding();
+    wrongCapability.connector.capability = 'processor';
+    expect(() => catalog.createBinding(project.id, wrongCapability)).toThrow(
+      'INVALID_PLUGIN_LOCK',
+    );
+    const invalidHash = preparedBinding();
+    invalidHash.processor.configHash = 'unverified';
+    expect(() => catalog.createBinding(project.id, invalidHash)).toThrow(
+      'INVALID_PLUGIN_LOCK',
+    );
+    expect(catalog.listBindings(project.id)).toHaveLength(2);
+  });
+
+  it('freezes executable package/config/import snapshots at enqueue and retains them after restart', () => {
+    const { catalog, binding, dbPath } = fixture();
+    const initial = imported();
+    catalog.putImport(binding.id, initial);
+    const queued = catalog.enqueue(binding.id, 'sync');
+    expect(queued.execution).toEqual({
+      instance: binding.connector,
+      imports: [initial],
+    });
+    const frozen = catalog.getRun(queued.id)!.execution;
+    queued.execution!.instance.config.fixture = 'mutated returned object';
+    queued.execution!.imports.length = 0;
+    const replacement = imported(initial.filename, {
+      contentHash: 'b'.repeat(64),
+    });
+    catalog.putImport(binding.id, replacement, initial.id);
+    expect(catalog.getRun(queued.id)?.execution).toEqual(frozen);
+    expect(catalog.enqueue(binding.id, 'sync').id).toBe(queued.id);
+    catalog.close();
+    open.delete(catalog);
+    const recovered = new Catalog(dbPath);
+    open.add(recovered);
+    expect(recovered.getRun(queued.id)?.execution).toEqual(frozen);
+    expect(recovered.listImports(binding.id)).toEqual([replacement]);
+    expect(
+      recovered.db
+        .prepare(
+          'SELECT active FROM binding_imports WHERE binding_id=? AND id=?',
+        )
+        .get(binding.id, initial.id)?.active,
+    ).toBe(0);
+  });
+
+  it.each(['add', 'replace', 'delete'] as const)(
+    'rejects source publication/noop after an import %s using the durable run snapshot',
+    (change) => {
+      const { catalog, project, binding } = fixture();
+      const initial = imported();
+      catalog.putImport(binding.id, initial);
+      const run = claim(catalog, binding);
+      if (change === 'add')
+        catalog.putImport(binding.id, imported('second.json'));
+      if (change === 'replace')
+        catalog.putImport(
+          binding.id,
+          imported(initial.filename, { contentHash: 'b'.repeat(64) }),
+          initial.id,
+        );
+      if (change === 'delete') catalog.removeImport(binding.id, initial.id);
+      // Supplying the current set in the caller's Run must not overwrite the
+      // enqueue-time lock already stored in the authority database.
+      run.execution!.imports = catalog.listImports(binding.id);
+      expect(() => publish(catalog, run, [file(binding)])).toThrow(
+        'INPUT_CHANGED',
+      );
+      expect(() => catalog.completeNoop(run, null, 'unpublished-sha')).toThrow(
+        'INPUT_CHANGED',
+      );
+      expect(catalog.head(project.id)).toBeNull();
+      expect(catalog.pendingOutbox()).toEqual([]);
+      expect(catalog.getBinding(binding.id)?.sourceVersion).toBeNull();
+      expect(catalog.getRun(run.id)?.execution?.imports).toEqual([initial]);
+      catalog.failRun(run, 'INPUT_CHANGED');
+      expect(catalog.getRun(run.id)?.state).toBe('superseded');
+      const replacement = catalog.enqueue(binding.id, 'sync');
+      expect(replacement.id).not.toBe(run.id);
+      expect(replacement.execution?.imports).toEqual(
+        catalog.listImports(binding.id),
+      );
+    },
+  );
+
+  it('pins processor configuration and input commit while allowing unrelated import changes', () => {
+    const { catalog, binding } = fixture();
+    const initial = publish(catalog, claim(catalog, binding), [file(binding)]);
+    const process = claim(catalog, binding, 'process');
+    expect(process.execution?.instance).toEqual(binding.processor);
+    expect(process.inputCommit).toBe(initial.commitId);
+    catalog.putImport(binding.id, imported());
+    catalog.completeNoop(process, initial.commitId);
+    expect(catalog.getRun(process.id)?.state).toBe('published');
+    expect(catalog.getRun(process.id)?.inputCommit).toBe(initial.commitId);
+    expect(catalog.getRun(process.id)?.execution?.imports).toEqual([]);
+  });
+
+  it('uses compare-and-swap import replacement and preserves the current object on conflicts/stale deletes', () => {
+    const { catalog, binding } = fixture();
+    const initial = imported();
+    expect(catalog.putImport(binding.id, initial)).toEqual(initial);
+    expect(
+      catalog.putImport(binding.id, imported(initial.filename), 'stale-client'),
+    ).toEqual(initial);
+    const replacement = imported(initial.filename, {
+      contentHash: 'b'.repeat(64),
+    });
+    expect(() => catalog.putImport(binding.id, replacement)).toThrow(
+      'IMPORT_CONFLICT',
+    );
+    expect(() =>
+      catalog.putImport(binding.id, replacement, 'stale-client'),
+    ).toThrow('IMPORT_CONFLICT');
+    expect(catalog.listImports(binding.id)).toEqual([initial]);
+    expect(catalog.putImport(binding.id, replacement, initial.id)).toEqual(
+      replacement,
+    );
+    expect(() => catalog.removeImport(binding.id, initial.id)).toThrow(
+      'NOT_FOUND',
+    );
+    expect(catalog.listImports(binding.id)).toEqual([replacement]);
+    expect(() =>
+      catalog.putImport(
+        binding.id,
+        { ...replacement, contentHash: 'c'.repeat(64) },
+        replacement.id,
+      ),
+    ).toThrow('IMPORT_ID_COLLISION');
+    expect(catalog.listImports(binding.id)).toEqual([replacement]);
+    catalog.removeImport(binding.id, replacement.id);
+    expect(catalog.listImports(binding.id)).toEqual([]);
+  });
+
+  it('enforces per-binding import count/byte limits inside the replacement transaction', () => {
+    const { catalog, project, binding } = fixture();
+    for (let index = 0; index < 32; index++)
+      catalog.putImport(binding.id, imported(`${index}.json`));
+    expect(() =>
+      catalog.putImport(binding.id, imported('overflow.json')),
+    ).toThrow('IMPORT_LIMIT');
+    const current = catalog.listImports(binding.id)[0]!;
+    const replacement = imported(current.filename, {
+      contentHash: 'b'.repeat(64),
+    });
+    catalog.putImport(binding.id, replacement, current.id);
+    expect(catalog.listImports(binding.id)).toHaveLength(32);
+    const other = catalog.createBinding(
+      project.id,
+      preparedBinding('Byte limit fixture'),
+    );
+    const large = imported('large.json', { bytes: 10 * 1024 * 1024 });
+    catalog.putImport(other.id, large);
+    expect(() =>
+      catalog.putImport(other.id, imported('overflow.json', { bytes: 1 })),
+    ).toThrow('IMPORT_LIMIT');
+    expect(catalog.listImports(other.id)).toEqual([large]);
+    catalog.putImport(
+      other.id,
+      imported('large.json', { contentHash: 'b'.repeat(64), bytes: 1 }),
+      large.id,
+    );
+    catalog.putImport(other.id, imported('next.json'));
+    expect(catalog.listImports(other.id)).toHaveLength(2);
+  });
+
+  it('isolates imported object references by binding and rejects revoked access', () => {
+    const { catalog, project, binding } = fixture();
+    const other = catalog.createBinding(
+      project.id,
+      preparedBinding('Other binding'),
+    );
+    const item = imported();
+    catalog.putImport(binding.id, item);
+    expect(catalog.listImports(other.id)).toEqual([]);
+    expect(() => catalog.removeImport(other.id, item.id)).toThrow('NOT_FOUND');
+    expect(() =>
+      catalog.putImport(binding.id, imported('../escape.json')),
+    ).toThrow('INVALID_IMPORT');
+    expect(() => catalog.putImport('missing-binding', imported())).toThrow(
+      'NOT_FOUND',
+    );
+    catalog.revokeBinding(binding.id);
+    expect(() => catalog.listImports(binding.id)).toThrow('BINDING_REVOKED');
+    expect(() => catalog.putImport(binding.id, imported())).toThrow(
+      'BINDING_REVOKED',
+    );
+    expect(() => catalog.removeImport(binding.id, item.id)).toThrow(
+      'BINDING_REVOKED',
+    );
+  });
+
+  it('migrates legacy bindings only through the resolver and permanently fails unpinned legacy runs', () => {
+    const { catalog, binding, dbPath } = fixture();
+    const running = claim(catalog, binding);
+    const queued = catalog.enqueue(binding.id, 'process');
+    catalog.db.exec(
+      'ALTER TABLE bindings DROP COLUMN connector_json; ALTER TABLE bindings DROP COLUMN processor_json; ALTER TABLE runs DROP COLUMN execution_json;',
+    );
+    catalog.close();
+    open.delete(catalog);
+    const migrated = new Catalog(dbPath);
+    open.add(migrated);
+    const legacy = migrated.getBinding(binding.id)!;
+    expect(legacy.connector).toBeNull();
+    expect(legacy.processor).toBeNull();
+    expect(legacy.packageRef).toBe('test.connector@1.0.0');
+    for (const old of [running, queued]) {
+      expect(migrated.getRun(old.id)?.state).toBe('failed');
+      expect(migrated.getRun(old.id)?.error).toBe('LEGACY_RUN_REQUIRES_RETRY');
+      expect(migrated.getRun(old.id)?.execution).toBeNull();
+    }
+    expect(migrated.claim()).toBeNull();
+    expect(() => migrated.enqueue(binding.id, 'sync')).toThrow(
+      'LEGACY_BINDING_REQUIRES_MIGRATION',
+    );
+    const replacement = preparedBinding('Explicit migration');
+    migrated.migrateLegacyBindings((old) => {
+      expect(old.id).toBe(binding.id);
+      expect(old.config).toEqual({ fixture: true });
+      return replacement;
+    });
+    expect(migrated.getBinding(binding.id)?.connector).toEqual(
+      replacement.connector,
+    );
+    expect(migrated.getBinding(binding.id)?.processor).toEqual(
+      replacement.processor,
+    );
+    migrated.migrateLegacyBindings(() => {
+      throw new Error('ALREADY_MIGRATED');
+    });
+    const newRun = migrated.enqueue(binding.id, 'sync');
+    expect(newRun.execution?.instance).toEqual(replacement.connector);
+    expect(migrated.getRun(running.id)?.state).toBe('failed');
+    expect(migrated.getRun(queued.id)?.execution).toBeNull();
+  });
+
+  it('rolls back an entire legacy binding migration when a resolver fails', () => {
+    const { catalog, project, binding } = fixture();
+    const other = catalog.createBinding(
+      project.id,
+      preparedBinding('Second legacy binding'),
+    );
+    catalog.db.exec(
+      'UPDATE bindings SET connector_json=NULL,processor_json=NULL',
+    );
+    let count = 0;
+    expect(() =>
+      catalog.migrateLegacyBindings(() => {
+        if (++count === 2) throw new Error('SYNTHETIC_RESOLVER_FAILURE');
+        return preparedBinding('Proposed migration');
+      }),
+    ).toThrow('SYNTHETIC_RESOLVER_FAILURE');
+    expect(catalog.getBinding(binding.id)?.connector).toBeNull();
+    expect(catalog.getBinding(other.id)?.connector).toBeNull();
+  });
+
   it('uses durable local settings and deduplicates active work per binding/kind', () => {
     const { catalog, project, binding } = fixture();
     expect(catalog.db.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe(
@@ -109,7 +462,8 @@ describe('SQLite authority with synthetic local data', () => {
       .prepare('SELECT lease_until FROM runs WHERE id=?')
       .get(run.id)?.lease_until;
     expect(Number(lease) - Date.now()).toBeGreaterThan(60_000);
-    expect(binding.instanceRef).toBe(`git-${binding.id}@1`);
+    expect(binding.instanceRef).toBe(binding.connector?.ref);
+    expect(binding.packageRef).toBe('test.connector@1.0.0');
   });
 
   it('stores only hashed reader tokens with current project scope and revocation', () => {
@@ -298,18 +652,228 @@ describe('SQLite authority with synthetic local data', () => {
     }
   });
 
-  it('rejects a still-open old authority after another process incarnation takes over', () => {
+  it('rejects a second active Catalog before changing authority or running work', () => {
     const { catalog, binding, dbPath } = fixture();
     const old = claim(catalog, binding);
-    const replacement = new Catalog(dbPath);
-    open.add(replacement);
-    expect(() => catalog.claim()).toThrow('LEASE_LOST');
-    expect(catalog.heartbeat(old.id, old.fence, old.incarnation)).toBe(false);
-    expect(() => catalog.completeNoop(old, null)).toThrow('LEASE_LOST');
-    const current = replacement.claim()!;
-    expect(current.id).toBe(old.id);
-    expect(current.incarnation).not.toBe(old.incarnation);
-    replacement.completeNoop(current, null);
+    expect(() => {
+      const second = new Catalog(dbPath);
+      open.add(second);
+    }).toThrow('CATALOG_IN_USE');
+    expect(catalog.getRun(old.id)?.state).toBe('running');
+    expect(catalog.heartbeat(old.id, old.fence, old.incarnation)).toBe(true);
+    catalog.completeNoop(old, null);
+  });
+
+  it('rejects a competing OS process without changing the existing authority', () => {
+    const { catalog, binding, dbPath } = fixture();
+    const running = claim(catalog, binding);
+    const attempt = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+      import { Catalog } from ${JSON.stringify(catalogModule)};
+      try { const catalog = new Catalog(process.argv[1]); catalog.close(); process.exitCode = 0; }
+      catch (error) { process.stdout.write(error.message); process.exitCode = 2; }
+    `,
+        dbPath,
+      ],
+      { encoding: 'utf8', timeout: 5000 },
+    );
+    expect(attempt.error).toBeUndefined();
+    expect(attempt.status).toBe(2);
+    expect(attempt.stdout).toBe('CATALOG_IN_USE');
+    expect(catalog.getRun(running.id)?.incarnation).toBe(catalog.incarnation);
+    expect(
+      catalog.heartbeat(running.id, running.fence, running.incarnation),
+    ).toBe(true);
+  });
+
+  it('releases OS authority after SIGKILL and recovers a real child process attempt', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'opencontext-authority-process-'));
+    temporaryRoots.push(root);
+    const dbPath = join(root, 'control.sqlite');
+    const child = spawn(
+      process.execPath,
+      [
+        '--input-type=module',
+        '--eval',
+        `
+      import { Catalog } from ${JSON.stringify(catalogModule)};
+      const catalog = new Catalog(process.argv[1]);
+      const project = catalog.createProject('Synthetic crash');
+      const binding = catalog.createBinding(project.id, ${JSON.stringify(preparedBinding('Child-process synthetic connector'))});
+      catalog.enqueue(binding.id, 'sync');
+      const run = catalog.claim();
+      process.send({run});
+      setInterval(() => { catalog.heartbeat(run.id, run.fence, run.incarnation); }, 1000);
+    `,
+        dbPath,
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] },
+    );
+    try {
+      const message = await childMessage(child);
+      const abandoned = message.run as Run;
+      expect(() => {
+        const unexpected = new Catalog(dbPath);
+        open.add(unexpected);
+      }).toThrow('CATALOG_IN_USE');
+      await stopChild(child);
+      const recovered = new Catalog(dbPath);
+      open.add(recovered);
+      expect(recovered.getRun(abandoned.id)?.state).toBe('queued');
+      expect(recovered.incarnation).not.toBe(abandoned.incarnation);
+      const newAttempt = recovered.claim()!;
+      expect(BigInt(newAttempt.fence)).toBe(BigInt(abandoned.fence) + 1n);
+      expect(
+        recovered.heartbeat(
+          abandoned.id,
+          abandoned.fence,
+          abandoned.incarnation,
+        ),
+      ).toBe(false);
+      recovered.completeNoop(newAttempt, null);
+    } finally {
+      await stopChild(child);
+    }
+  });
+
+  it('persists demo mode and rejects private reuse before changing incarnation or queues', () => {
+    const root = mkdtempSync(join(tmpdir(), 'opencontext-data-mode-'));
+    temporaryRoots.push(root);
+    const dbPath = join(root, 'control.sqlite');
+    const demo = new Catalog(dbPath, { mode: 'demo' });
+    open.add(demo);
+    const project = demo.createProject('Synthetic demo');
+    const binding = demo.createBinding(project.id, preparedBinding());
+    const run = claim(demo, binding);
+    expect(
+      demo.db
+        .prepare("SELECT value FROM catalog_meta WHERE key='deployment_mode'")
+        .get()?.value,
+    ).toBe('demo');
+    demo.close();
+    open.delete(demo);
+    expect(() => {
+      const wrong = new Catalog(dbPath);
+      open.add(wrong);
+    }).toThrow('DATA_MODE_MISMATCH');
+    const inspection = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        inspection
+          .prepare("SELECT value FROM catalog_meta WHERE key='incarnation'")
+          .get()?.value,
+      ).toBe(run.incarnation);
+      expect(
+        inspection.prepare('SELECT state FROM runs WHERE id=?').get(run.id)
+          ?.state,
+      ).toBe('running');
+    } finally {
+      inspection.close();
+    }
+    const resumed = new Catalog(dbPath, { mode: 'demo' });
+    open.add(resumed);
+    expect(resumed.getRun(run.id)?.state).toBe('queued');
+  });
+
+  it('treats legacy databases as private and refuses demo before any migration', () => {
+    const { catalog, binding, dbPath } = fixture();
+    const run = claim(catalog, binding);
+    catalog.db.exec(
+      "DELETE FROM catalog_meta WHERE key='deployment_mode'; ALTER TABLE runs DROP COLUMN skipped_json;",
+    );
+    catalog.close();
+    open.delete(catalog);
+    expect(() => {
+      const wrong = new Catalog(dbPath, { mode: 'demo' });
+      open.add(wrong);
+    }).toThrow('DATA_MODE_MISMATCH');
+    const inspection = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        inspection
+          .prepare('PRAGMA table_info(runs)')
+          .all()
+          .some((column) => column.name === 'skipped_json'),
+      ).toBe(false);
+      expect(
+        inspection
+          .prepare("SELECT value FROM catalog_meta WHERE key='incarnation'")
+          .get()?.value,
+      ).toBe(run.incarnation);
+      expect(
+        inspection.prepare('SELECT state FROM runs WHERE id=?').get(run.id)
+          ?.state,
+      ).toBe('running');
+    } finally {
+      inspection.close();
+    }
+    const resumed = new Catalog(dbPath);
+    open.add(resumed);
+    expect(
+      resumed.db
+        .prepare("SELECT value FROM catalog_meta WHERE key='deployment_mode'")
+        .get()?.value,
+    ).toBe('private');
+    expect(resumed.getRun(run.id)?.state).toBe('queued');
+  });
+
+  it('closes idempotently and permits independent in-memory authorities', () => {
+    const a = new Catalog(':memory:');
+    const b = new Catalog(':memory:', { mode: 'demo' });
+    open.add(a);
+    open.add(b);
+    a.createProject('Memory A');
+    expect(b.listProjects()).toEqual([]);
+    a.close();
+    open.delete(a);
+    expect(() => a.close()).not.toThrow();
+    b.close();
+    open.delete(b);
+  });
+
+  it('uses the same lifetime authority for a symlink alias and retains the lock file', () => {
+    const { catalog, dbPath } = fixture();
+    const alias = `${dbPath}.alias`;
+    symlinkSync(dbPath, alias);
+    expect(() => new Catalog(alias)).toThrow('CATALOG_IN_USE');
+    expect(existsSync(`${dbPath}.authority.sqlite`)).toBe(true);
+    catalog.close();
+    open.delete(catalog);
+    expect(() => catalog.close()).not.toThrow();
+    expect(existsSync(`${dbPath}.authority.sqlite`)).toBe(true);
+    const reopened = new Catalog(alias);
+    open.add(reopened);
+    expect(() => new Catalog(dbPath)).toThrow('CATALOG_IN_USE');
+  });
+
+  it('releases authority when construction fails while reading a corrupt control database', () => {
+    const root = mkdtempSync(
+      join(tmpdir(), 'opencontext-constructor-failure-'),
+    );
+    temporaryRoots.push(root);
+    const dbPath = join(root, 'control.sqlite');
+    writeFileSync(dbPath, 'synthetic invalid SQLite bytes');
+    expect(() => new Catalog(dbPath)).toThrow();
+    const lock = new DatabaseSync(`${dbPath}.authority.sqlite`);
+    try {
+      expect(() => lock.exec('BEGIN EXCLUSIVE')).not.toThrow();
+    } finally {
+      lock.close();
+    }
+    // The failed instance owns no active connection. Replace only its synthetic
+    // corrupt control data; retain the authority file throughout recovery.
+    rmSync(dbPath);
+    const repaired = new Catalog(dbPath, { mode: 'demo' });
+    open.add(repaired);
+    expect(
+      repaired.db
+        .prepare("SELECT value FROM catalog_meta WHERE key='deployment_mode'")
+        .get()?.value,
+    ).toBe('demo');
   });
 
   it('recovers running work with a new incarnation and retains committed state/outbox', () => {
@@ -392,11 +956,10 @@ describe('SQLite authority with synthetic local data', () => {
 
   it('revokes source and transitive derived reads without rewriting historical revisions', () => {
     const { catalog, project, binding } = fixture();
-    const processor = catalog.createBinding(project.id, {
-      name: 'Other producer',
-      repoUrl: '/synthetic/other',
-      branch: 'main',
-    });
+    const processor = catalog.createBinding(
+      project.id,
+      preparedBinding('Other producer'),
+    );
     const source = file(binding);
     const derived = file(processor, {
       logicalPath: 'derived/first.md',

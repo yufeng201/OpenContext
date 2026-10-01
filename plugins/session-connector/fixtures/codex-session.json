@@ -1,0 +1,50 @@
+{
+  "schema": "opencontext.session-import/v1",
+  "provider": "codex",
+  "projectScope": "synthetic-project",
+  "sessionId": "01900000-0000-7000-8000-000000000001",
+  "complete": true,
+  "payload": {
+    "thread": {
+      "id": "01900000-0000-7000-8000-000000000001",
+      "sessionId": "01900000-0000-7000-8000-000000000001",
+      "projectId": null,
+      "cliVersion": "0.159.2",
+      "createdAt": 1790762400,
+      "updatedAt": 1790762401,
+      "cwd": "/synthetic/project",
+      "ephemeral": false,
+      "modelProvider": "openai",
+      "preview": "How should this failure be retried?",
+      "source": "cli",
+      "status": {
+        "type": "notLoaded"
+      },
+      "historyMode": "legacy",
+      "turns": [
+        {
+          "id": "01900000-0000-7000-8000-000000000002",
+          "status": "completed",
+          "itemsView": "full",
+          "items": [
+            {
+              "type": "userMessage",
+              "id": "fixture-user-1",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "How should this failure be retried?"
+                }
+              ]
+            },
+            {
+              "type": "agentMessage",
+              "id": "fixture-agent-1",
+              "text": "Experience: Retry transient failures with bounded backoff.\nRule: Keep source revision citations in generated context."
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

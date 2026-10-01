@@ -320,6 +320,75 @@ describe('actual server + Git + durable files + index + processor', () => {
     origin = await f.application.app.listen({ host: '127.0.0.1', port: 0 });
     await assertDenied();
   });
+  it('does not label a historical generated revision fresh after regeneration', async () => {
+    const f = fixture(),
+      { project, binding } = await f.setup();
+    await f.run(project.id, binding.id);
+    await f.run(project.id, binding.id, 'process');
+    const original = (await f.search(project.id, 'alpha-needle')).hits.find(
+      (hit) => hit.file.collection === 'derived',
+    )!.file;
+    const url =
+      '/api/projects/' +
+      project.id +
+      '/read?fileId=' +
+      original.fileId +
+      '&revisionId=' +
+      original.revisionId;
+    const read = async () => {
+      const response = await f.application.app.inject({ url, headers });
+      expect(response.statusCode).toBe(200);
+      return response.json<ReadResult>();
+    };
+    expect((await read()).file.freshness).toBe('fresh');
+    writeFileSync(resolve(f.repo, 'README.md'), '# Changed\nomega-needle\n');
+    f.git('add', '.');
+    f.git('commit', '-m', 'update generated input');
+    await f.run(project.id, binding.id);
+    expect((await read()).file.freshness).toBe('stale');
+    await f.run(project.id, binding.id, 'process');
+    const old = await read();
+    expect(old.text).toContain('alpha-needle');
+    expect(old.file.freshness).toBe('stale');
+    expect(old.citation.revisionId).toBe(original.revisionId);
+    const next = (await f.search(project.id, 'omega-needle')).hits.find(
+      (hit) => hit.file.collection === 'derived',
+    )!;
+    expect(next.file.freshness).toBe('fresh');
+    expect(next.file.revisionId).not.toBe(original.revisionId);
+    await f.restart();
+    expect((await read()).file.freshness).toBe('stale');
+    const origin = await f.application.app.listen({
+      host: '127.0.0.1',
+      port: 0,
+    });
+    const response = await fetch(new URL('/mcp', origin), {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2025-11-25',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'context_read',
+          arguments: {
+            projectId: project.id,
+            fileId: original.fileId,
+            revisionId: original.revisionId,
+          },
+        },
+      }),
+    });
+    const result = (await response.json()) as {
+      result: { structuredContent: ReadResult };
+    };
+    expect(result.result.structuredContent.file.freshness).toBe('stale');
+  });
   it('survives restart with queued work, fixed citations and persistent index', async () => {
     const f = fixture(),
       { project, binding } = await f.setup();

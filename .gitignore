@@ -19,9 +19,11 @@ test-results/
 secrets/
 credentials/
 runtime/
+runtime-demo/
 data/
 backups/
 staging/
+plugin-state/
 .codex/
 .claude/settings.local.json
 .claude/.credentials.json
