@@ -93,12 +93,21 @@ export function createApplication(options: ApplicationOptions) {
   const store = new FileStore(options.dataRoot);
   const auditDispatcher = new AuditDispatcher(catalog);
   let auditFailure = false;
-  const recordAudit = (event: AuditEvent) => {
+  const markReadGap = () => {
+    auditFailure = true;
     try {
-      auditDispatcher.flush();
+      catalog.setAuditReadGap(true);
+      auditFailure = false;
+    } catch {
+      /* The in-memory gap remains; never claim persistence. */
+    }
+  };
+  const recordAudit = (event: AuditEvent, replay = true) => {
+    try {
+      if (replay) auditDispatcher.flush();
       catalog.appendAudit(event);
     } catch {
-      auditFailure = true;
+      markReadGap();
     }
   };
   const coordinator = new Coordinator(
@@ -112,7 +121,7 @@ export function createApplication(options: ApplicationOptions) {
       try {
         originRequest = catalog.auditRequestForJob(run.id);
       } catch {
-        auditFailure = true;
+        markReadGap();
       }
       recordAudit({
         ...auditEvent(
@@ -175,11 +184,19 @@ export function createApplication(options: ApplicationOptions) {
   }
   function auditStatus() {
     const status = auditDispatcher.status();
+    let persisted = false;
+    try {
+      persisted = catalog.auditReadGap();
+    } catch {
+      auditFailure = true;
+    }
+    const readGap = persisted || auditFailure;
     return {
       ...status,
-      ok: status.ok && !auditFailure,
-      code: auditFailure ? 'AUDIT_UNAVAILABLE' : status.code,
-      readGap: auditFailure,
+      ok: status.ok && !readGap,
+      code: readGap ? 'AUDIT_UNAVAILABLE' : status.code,
+      readGap,
+      readGapPersisted: persisted && !auditFailure,
     };
   }
   function credential(request: FastifyRequest): string {
@@ -437,6 +454,7 @@ export function createApplication(options: ApplicationOptions) {
           request.id,
           requestJobs.get(request) ?? null,
         ),
+        route !== '/api/audit/retry',
       );
     }
     done();
@@ -881,13 +899,19 @@ export function createApplication(options: ApplicationOptions) {
     },
     (request, reply) => {
       authorize(authenticate(request), undefined, true);
-      auditDispatcher.retry();
-      if (request.body.acknowledgeReadGap && auditDispatcher.status().ok)
-        auditFailure = false;
+      const delivered = auditDispatcher.retry();
+      if (request.body.acknowledgeReadGap && auditDispatcher.status().ok) {
+        try {
+          catalog.setAuditReadGap(false);
+          auditFailure = false;
+        } catch {
+          markReadGap();
+        }
+      }
       const status = auditStatus();
       if (!status.ok) requestCodes.set(request, status.code);
       reply.code(status.ok ? 200 : 503);
-      return { audit: status };
+      return { audit: status, delivered, budget: 100 };
     },
   );
   registerMcp(app, services);

@@ -13,7 +13,7 @@
 
 最小版本先用owner/reader。若需非owner纠正/推广候选，再定义editor具体动作；不要发全局owner来实现协作。组织成员不自动读所有空间，退出/移除影响已有REST/SDK/CLI/MCP连接和后台发布；历史读也查当前权限。已复制字节无法收回。
 
-OIDC只产出稳定`issuer + subject`，由服务器映射本地成员/space角色，不信任邮箱显示名或客户端角色。Web用有限寿命Secure/HttpOnly session，Agent用独立可撤销scope token；IdP token不当采集secret或传给模型。bootstrap owner须受控迁移/轮换，不映射所有SSO用户。统一gate：active成员→space角色→来源当前权限→固定revision；任务执行/发布和检索到读取重新校验。审计归属真实subject，后续加事务outbox和独立sink。OIDC协议/PKCE/state/nonce、session撤销须单独实施验收。
+OIDC只产出稳定`issuer + subject`，由服务器映射本地成员/space角色，不信任邮箱显示名或客户端角色。Web用有限寿命Secure/HttpOnly session，Agent用独立可撤销scope token；IdP token不当采集secret或传给模型。bootstrap owner须受控迁移/轮换，不映射所有SSO用户。统一gate：active成员→space角色→来源当前权限→固定revision；任务执行/发布和检索到读取重新校验。关键变更事务outbox已实现，但当前owner仍是聚合身份；后续把审计归属接到真实subject，并验收身份撤销事务与独立sink。OIDC协议/PKCE/state/nonce、session撤销须单独实施验收。
 
 **四项待确认：** 是否接受一实例一组织；IdP组同步还是管理员邀请；owner/reader是否足够、哪些维护动作需editor；空间内是否需逐来源授权。另需用户指定已有IdP、撤销时效、审计负责人/保留策略和合成测试空间，未确认前不连账号。
 

@@ -10,7 +10,16 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { TextIndex } from '../../packages/retrieval/src/index.ts';
+import { FileStore } from '../../packages/storage-fs/src/index.ts';
+import { DatabaseSync } from 'node:sqlite';
+import {
+  inspectStorage,
+  createBackup,
+  verifyBackup,
+  restoreBackup,
+} from '../../packages/state-sqlite/src/maintenance.ts';
 import { Catalog } from '../../packages/state-sqlite/src/index.ts';
 import { StaticRegistry } from '../../packages/plugin-host/src/index.ts';
 import { repoDefinition } from '../../plugins/repo-connector/src/index.ts';
@@ -355,6 +364,7 @@ it('sink failure preserves committed management events, circuit bounds retries, 
     maxPending: 10000,
     suspended: true,
     readGap: true,
+    readGapPersisted: true,
   });
   expect(ready.body).not.toContain('PRIVATE_SINK_DETAIL');
   app.catalog.db.exec('DROP TRIGGER refuse_sink');
@@ -430,6 +440,7 @@ it('automatic restart recovery is bounded, backlog yields503, and subsequent hea
     maxPending: 10000,
     suspended: false,
     readGap: false,
+    readGapPersisted: false,
   });
   app.auditDispatcher.flush();
   const recovered = await app.app.inject({ url: '/api/readiness', headers });
@@ -441,6 +452,7 @@ it('automatic restart recovery is bounded, backlog yields503, and subsequent hea
     maxPending: 10000,
     suspended: false,
     readGap: false,
+    readGapPersisted: false,
   });
 });
 
@@ -474,4 +486,233 @@ it('upgrades the legacy audit table without losing existing effects or best-effo
   expect(catalog.auditPending().pending).toBe(1);
   catalog.deliverAuditBatch();
   expect(catalog.auditEvents(0, 100).events).toHaveLength(2);
+});
+
+function application(f: ReturnType<typeof fixture>) {
+  const app = createApplication({
+    dataRoot: f.root,
+    ownerToken: owner,
+    autoStart: false,
+  });
+  cleanups.push(async () => {
+    await app.app.close();
+  });
+  return app;
+}
+it('a persisted read gap survives restart until explicit healthy owner acknowledgement', async () => {
+  const f = fixture();
+  f.close();
+  const first = application(f);
+  first.catalog.db.exec(
+    "CREATE TRIGGER refuse_sink BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT,'PRIVATE_SINK_DETAIL'); END;",
+  );
+  await first.app.inject({ url: '/api/projects', headers });
+  first.catalog.db.exec('DROP TRIGGER refuse_sink');
+  await first.app.close();
+  const restarted = application(f);
+  const ready = await restarted.app.inject({ url: '/api/readiness', headers });
+  expect(ready.statusCode).toBe(503);
+  expect(ready.json().audit.readGap).toBe(true);
+  expect(ready.json().audit.readGapPersisted).toBe(true);
+  const retry = await restarted.app.inject({
+    method: 'POST',
+    url: '/api/audit/retry',
+    headers,
+    payload: {},
+  });
+  expect(retry.statusCode).toBe(503);
+  const ack = await restarted.app.inject({
+    method: 'POST',
+    url: '/api/audit/retry',
+    headers,
+    payload: { acknowledgeReadGap: true },
+  });
+  expect(ack.statusCode).toBe(200);
+  await restarted.app.close();
+  const final = application(f);
+  expect(
+    (await final.app.inject({ url: '/api/readiness', headers })).json().audit
+      .readGap,
+  ).toBe(false);
+});
+it('one retry request delivers at most100 including its onResponse audit', async () => {
+  const f = fixture();
+  for (let n = 0; n < 205; n++) f.catalog.createProject('synthetic');
+  f.close();
+  const app = application(f);
+  const response = await app.app.inject({
+    method: 'POST',
+    url: '/api/audit/retry',
+    headers,
+    payload: {},
+  });
+  expect(response.statusCode).toBe(503);
+  expect(app.catalog.auditPending().pending).toBe(105);
+  expect(response.json().delivered).toBe(100);
+  expect(response.json().budget).toBe(100);
+  expect(response.json().audit.pending).toBe(105);
+  expect(app.catalog.auditPending().pending).toBe(105);
+  expect(
+    app.catalog
+      .auditEvents(0, 1000)
+      .events.filter((e) => e.action === 'audit.retry'),
+  ).toHaveLength(1);
+});
+it('offline checks reject malformed current pending and schema, while legitimate backlog remains snapshot-ready', () => {
+  const f = fixture();
+  new FileStore(f.root);
+  new TextIndex(f.catalog.db);
+  f.catalog.createProject('pending');
+  expect(inspectStorage(f.root, f.catalog.db).ready).toBe(true);
+  f.catalog.db
+    .prepare(
+      "UPDATE audit_pending SET event_json=json_set(event_json,'$.guarantee','best_effort')",
+    )
+    .run();
+  expect(inspectStorage(f.root, f.catalog.db).ready).toBe(false);
+  f.catalog.db.exec('DELETE FROM audit_pending; DROP TABLE audit_pending');
+  expect(inspectStorage(f.root, f.catalog.db).ready).toBe(false);
+});
+it('backup verification rejects semantically corrupt pending even after snapshot hashes are refreshed', async () => {
+  const f = fixture();
+  new FileStore(f.root);
+  new TextIndex(f.catalog.db);
+  f.catalog.createProject('pending');
+  f.close();
+  const parent = mkdtempSync(join(tmpdir(), 'oc-audit-backup-'));
+  cleanups.push(async () => {
+    rmSync(parent, { recursive: true, force: true });
+  });
+  const snapshot = join(parent, 'snapshot');
+  await createBackup(f.root, snapshot);
+  expect(verifyBackup(snapshot).complete).toBe(true);
+  const db = new DatabaseSync(join(snapshot, 'control.sqlite'));
+  db.exec(
+    "UPDATE audit_pending SET event_json=json_set(event_json,'$.guarantee','best_effort')",
+  );
+  db.close();
+  const manifest = JSON.parse(
+    readFileSync(join(snapshot, 'manifest.json'), 'utf8'),
+  );
+  const file = manifest.files.find(
+    (e: { path: string }) => e.path === 'control.sqlite',
+  );
+  const bytes = readFileSync(join(snapshot, 'control.sqlite'));
+  file.bytes = bytes.length;
+  file.sha256 = createHash('sha256').update(bytes).digest('hex');
+  const raw = JSON.stringify(manifest) + '\n';
+  writeFileSync(join(snapshot, 'manifest.json'), raw);
+  writeFileSync(
+    join(snapshot, 'manifest.sha256'),
+    createHash('sha256').update(raw).digest('hex') + '\n',
+  );
+  expect(() => verifyBackup(snapshot)).toThrow('SNAPSHOT_NOT_READY');
+});
+
+it('storage failure never claims read gap persistence and failed acknowledgement remains degraded', async () => {
+  const f = fixture();
+  f.close();
+  const app = application(f);
+  app.catalog.db.exec(
+    "CREATE TRIGGER refuse_sink BEFORE INSERT ON audit_events BEGIN SELECT RAISE(ABORT,'PRIVATE_SINK_DETAIL'); END; CREATE TRIGGER refuse_gap BEFORE INSERT ON catalog_meta WHEN NEW.key='audit_read_gap' BEGIN SELECT RAISE(ABORT,'PRIVATE_GAP_DETAIL'); END;",
+  );
+  await app.app.inject({ url: '/api/projects', headers });
+  const unpersisted = await app.app.inject({ url: '/api/readiness', headers });
+  expect(unpersisted.statusCode).toBe(503);
+  expect(unpersisted.json().audit.readGap).toBe(true);
+  expect(unpersisted.json().audit.readGapPersisted).toBe(false);
+  expect(unpersisted.body).not.toContain('PRIVATE_GAP_DETAIL');
+  expect(app.catalog.auditReadGap()).toBe(false);
+  app.catalog.db.exec('DROP TRIGGER refuse_gap');
+  await app.app.inject({ url: '/api/projects', headers });
+  expect(app.catalog.auditReadGap()).toBe(true);
+  app.catalog.db.exec(
+    "DROP TRIGGER refuse_sink; CREATE TRIGGER refuse_ack BEFORE DELETE ON catalog_meta WHEN OLD.key='audit_read_gap' BEGIN SELECT RAISE(ABORT,'PRIVATE_ACK_DETAIL'); END;",
+  );
+  const ack = await app.app.inject({
+    method: 'POST',
+    url: '/api/audit/retry',
+    headers,
+    payload: { acknowledgeReadGap: true },
+  });
+  expect(ack.statusCode).toBe(503);
+  expect(ack.json().audit.readGap).toBe(true);
+  expect(app.catalog.auditReadGap()).toBe(true);
+  expect(ack.body).not.toContain('PRIVATE_ACK_DETAIL');
+  app.catalog.db.exec('DROP TRIGGER refuse_ack');
+  expect(
+    (
+      await app.app.inject({
+        method: 'POST',
+        url: '/api/audit/retry',
+        headers,
+        payload: { acknowledgeReadGap: true },
+      })
+    ).statusCode,
+  ).toBe(200);
+});
+it('offline schema validation rejects missing unique index and startup refuses damaged current format before writes', () => {
+  const f = fixture();
+  new FileStore(f.root);
+  new TextIndex(f.catalog.db);
+  f.catalog.db.exec('DROP INDEX audit_event_id');
+  expect(inspectStorage(f.root, f.catalog.db).checks.migration.ok).toBe(false);
+  f.close();
+  const before = readFileSync(f.path);
+  expect(() => new Catalog(f.path)).toThrow('SCHEMA_UNSUPPORTED');
+  expect(readFileSync(f.path)).toEqual(before);
+});
+it('offline validation accepts reviewed legacy ledger and preserves a valid persisted gap in snapshots', async () => {
+  const f = fixture();
+  new FileStore(f.root);
+  new TextIndex(f.catalog.db);
+  f.catalog.db.exec(
+    "DROP TABLE audit_pending; ALTER TABLE audit_events DROP COLUMN delivered_at; DROP INDEX audit_event_id; DELETE FROM catalog_meta WHERE key='audit_format';",
+  );
+  expect(inspectStorage(f.root, f.catalog.db).ready).toBe(true);
+  const db = f.reopen();
+  db.setAuditReadGap(true);
+  f.close();
+  const parent = mkdtempSync(join(tmpdir(), 'oc-gap-snapshot-'));
+  cleanups.push(async () => {
+    rmSync(parent, { recursive: true, force: true });
+  });
+  const snapshot = join(parent, 'snapshot');
+  await createBackup(f.root, snapshot);
+  expect(verifyBackup(snapshot).complete).toBe(true);
+  const copy = new DatabaseSync(join(snapshot, 'control.sqlite'), {
+    readOnly: true,
+  });
+  try {
+    expect(
+      copy
+        .prepare("SELECT value FROM catalog_meta WHERE key='audit_read_gap'")
+        .get()?.value,
+    ).toBe('1');
+  } finally {
+    copy.close();
+  }
+  const restored = join(parent, 'restored');
+  restoreBackup(snapshot, restored);
+  const app = createApplication({
+    dataRoot: restored,
+    ownerToken: owner,
+    autoStart: false,
+  });
+  cleanups.push(async () => {
+    await app.app.close();
+  });
+  const ready = await app.app.inject({ url: '/api/readiness', headers });
+  expect(ready.statusCode).toBe(503);
+  expect(ready.json().audit.readGapPersisted).toBe(true);
+  expect(
+    (
+      await app.app.inject({
+        method: 'POST',
+        url: '/api/audit/retry',
+        headers,
+        payload: { acknowledgeReadGap: true },
+      })
+    ).statusCode,
+  ).toBe(200);
 });

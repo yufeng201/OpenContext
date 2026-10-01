@@ -3,6 +3,7 @@ import {
   type BackupManifest,
 } from '@opencontext/contracts/maintenance';
 import { DatabaseSync, backup } from 'node:sqlite';
+import { validateAuditStorage } from './audit-storage.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   constants,
@@ -246,6 +247,7 @@ export function inspectStorage(
       .get()?.value;
     if (auditFormat !== undefined && auditFormat !== '2')
       fail('SCHEMA_UNSUPPORTED');
+    validateAuditStorage(db);
     for (const [table, column] of [
       ['bindings', 'connector_json'],
       ['bindings', 'processor_json'],

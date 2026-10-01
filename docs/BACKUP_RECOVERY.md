@@ -8,7 +8,7 @@
 
 控制库使用Node SQLite backup API复制，包含已提交WAL页；快照副本规范化为DELETE journal，避免依赖未校验的wal/shm。源库不迁移或改授权。内容保存全部历史blob/revision/commit，包含inactive导入对象；飞书快照/游标所需plugin-state一起复制。每个文件有路径、bytes、SHA256，manifest也有SHA256、格式/存储版本、部署模式和项目head。SQLite quick_check/foreign_key_check、所有引用、版本元数据、commit hash、导入对象、飞书确认checkpoint、索引generation/正文关联在完成前核对。
 
-当前硬限额：20,000个文件，单文件128MiB，总512MiB，manifest8MiB。完整性探针也有界；重复引用会计入检查预算。这些是开发预览防滥用限制，不是已压测的容量承诺。目录包不压缩，不接受tar/zip解包路径。拒绝绝对/上级/编码路径、重复项、符号链接、硬链接及额外文件；macOS系统/var和/tmp标准别名允许，数据内部链接拒绝。未知版本或缺blob/checkpoint均fail closed。
+当前硬限额：20,000个文件，单文件128MiB，总512MiB，manifest8MiB。完整性探针也有界；重复引用会计入检查预算。这些是开发预览防滥用限制，不是已压测的容量承诺。目录包不压缩，不接受tar/zip解包路径。拒绝绝对/上级/编码路径、重复项、符号链接、硬链接及额外文件；macOS系统/var和/tmp标准别名允许，数据内部链接拒绝。未知版本或缺blob/checkpoint均fail closed。审计格式/表字段/主键/唯一索引、事件与pending语义也纳入校验；当前格式缺表/损坏拒绝，合法旧无审计库和955 ledger可迁移。合法pending/readGap会原样进入快照，离线校验允许它们，不能据此声称在线审计健康；恢复启动后检查owner readiness并显式确认持久缺口，详见[事务审计](AUDIT_DURABILITY.md)。
 
 ## 操作命令
 

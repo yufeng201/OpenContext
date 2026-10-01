@@ -372,6 +372,7 @@ it('audit append failure degrades owner readiness without exposing database deta
     maxPending: 10000,
     suspended: false,
     readGap: true,
+    readGapPersisted: true,
   });
   expect(response.body).not.toContain('no such table');
 });

@@ -118,6 +118,7 @@ export const ReadinessReportSchema = Type.Object(
           maxPending: Type.Optional(Type.Literal(10000)),
           suspended: Type.Optional(Type.Boolean()),
           readGap: Type.Optional(Type.Boolean()),
+          readGapPersisted: Type.Optional(Type.Boolean()),
         },
         { additionalProperties: false },
       ),

@@ -18,25 +18,27 @@ export class AuditDispatcher {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
   }
-  flush(now = Date.now()): void {
-    if (this.suspended || now < this.nextAttempt) return;
+  flush(now = Date.now()): number {
+    if (this.suspended || now < this.nextAttempt) return 0;
     try {
-      this.catalog.deliverAuditBatch(100);
+      const delivered = this.catalog.deliverAuditBatch(100);
       this.fault = false;
       this.failures = 0;
       this.nextAttempt = 0;
+      return delivered;
     } catch {
       this.fault = true;
       this.failures++;
       this.nextAttempt = now + Math.min(30000, 1000 * 2 ** (this.failures - 1));
       if (this.failures >= 5) this.suspended = true;
+      return 0;
     }
   }
-  retry(): void {
+  retry(): number {
     this.suspended = false;
     this.nextAttempt = 0;
     this.failures = 0;
-    this.flush();
+    return this.flush();
   }
   status() {
     try {

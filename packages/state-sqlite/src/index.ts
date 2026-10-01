@@ -14,6 +14,7 @@ import {
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { validateAuditStorage } from './audit-storage.ts';
 import type {
   Binding,
   ExecutionLock,
@@ -195,6 +196,7 @@ export class Catalog {
         : undefined;
       if (auditFormat !== undefined && auditFormat !== '2')
         throw new Error('SCHEMA_UNSUPPORTED');
+      if (auditFormat === '2') validateAuditStorage(this.db);
       const savedMode = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
             .prepare(
@@ -777,6 +779,29 @@ export class Catalog {
       maxPending: 10000,
       oldest: row['oldest'] as string | null,
     };
+  }
+  auditReadGap(): boolean {
+    const value = this.db
+      .prepare("SELECT value FROM catalog_meta WHERE key='audit_read_gap'")
+      .get()?.['value'];
+    if (value !== undefined && value !== '1')
+      throw new Error('AUDIT_UNAVAILABLE');
+    return value === '1';
+  }
+  setAuditReadGap(present: boolean): void {
+    this.transaction(() => {
+      this.assertAuthority();
+      if (present)
+        this.db
+          .prepare(
+            "INSERT INTO catalog_meta(key,value) VALUES('audit_read_gap','1') ON CONFLICT(key) DO UPDATE SET value='1'",
+          )
+          .run();
+      else
+        this.db
+          .prepare("DELETE FROM catalog_meta WHERE key='audit_read_gap'")
+          .run();
+    });
   }
   private insertAudit(event: AuditEvent): void {
     const json = JSON.stringify(parseAuditEvent(event));

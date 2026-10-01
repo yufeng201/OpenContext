@@ -33,7 +33,7 @@
 
 ## 健康与恢复入口
 
-owner readiness报告audit的pending/maxPending/suspended/readGap：未投递积压为503/AUDIT_BACKLOG，sink故障为503/AUDIT_UNAVAILABLE。health仍仅存活。只读/拒绝日志失败会留下readGap告警；本机修复sink并成功投递后，owner可明确承认历史只读日志缺口，不能假称补回日志。
+owner readiness报告audit的pending/maxPending/suspended/readGap：未投递积压为503/AUDIT_BACKLOG，sink故障为503/AUDIT_UNAVAILABLE。health仍仅存活。只读/拒绝日志失败会尝试独立事务写入catalog_meta中的readGap标记，成功后跨重启/备份恢复保留。readGapPersisted=true只说明缺口标记持久化，不说明丢失事件已保存；没有缺口时该字段为false。若控制存储本身故障，readGap=true/readGapPersisted=false只在本进程内保留，重启可能丢失告警，不能承诺故障存储仍可持久；需操作员保留该故障证据。本机修复sink、排空pending后，owner须显式确认缺口；确认删除标记也须事务提交，失败保持503和告警，不能补造丢失日志。
 
 ```sh
 # 使用已有owner凭据；不打印、创建或存储token
@@ -44,7 +44,7 @@ curl --header "Authorization: Bearer $OPENCONTEXT_OWNER_TOKEN" \
   'http://127.0.0.1:4310/api/audit/retry'
 ```
 
-pending导出和retry均owner-only，reader403/无认证401；不允许客户端提供sink、路径、payload或预算。retry每次只恢复一次最多100条尝试，仍可能返回503/有积压。`{"acknowledgeReadGap":true}`只在sink已健康且pending排空时承认只读日志缺口并清除该告警，**不创建丢失事件**。恢复/retry请求本身是best effort事件。
+pending导出和retry均owner-only，reader403/无认证401；不允许客户端提供sink、路径、payload或预算。每个retry请求只在路由中调用一次投递，onResponse仅追加该请求的best effort记录，不再投递pending；该请求投递最多100条。响应delivered是实际本次事务ACK条数，budget固定100；失败为0。独立后台tick和其他请求仍可推进队列，响应pending是计算响应时的状态，不能当锁定快照；仍可能返回503/有积压。`{"acknowledgeReadGap":true}`只在sink已健康且pending排空时承认只读日志缺口并清除该告警，**不创建丢失事件**。恢复/retry请求本身是best effort事件。
 
 已投递表保留最多10000条/30天，30天从本地投递时间计，以免多年pending一到sink立即超龄；旧表兼容回退原time。导出仍展示原事件时间。pending不参与该裁剪。保留上限达到较早条件会移除已投递事件；备份/导出另有保留责任，SQLite删除不等于安全擦除。导出仍用snapshotSequence高水位分页，不能将其称锁定快照。
 
@@ -52,6 +52,6 @@ pending导出和retry均owner-only，reader403/无认证401；不允许客户端
 
 兼容95546826旧表/记录，新增delivered_at和唯一事件索引、audit_pending、audit_format=2。未知audit_format在当前启动/停写预检中拒绝，启动不先写incarnation或迁移控制库。若旧表已有冲突事件ID会拒绝索引升级，须在备份后由受信操作员调查，不能自动删记录。**禁止降级到旧二进制写此库**：95546826没有检查新audit_format，不能宣称所有历史版本已强制防降级；完整迁移/回滚门禁仍是P0。
 
-联合SQLite备份包含未投递意图；恢复后当前软件有界重放，原reader撤销/当前权限复核仍适用。审计不能知道快照之后的成员撤权、法规删除或OS操作，不替代原备份授权流程。
+离线diagnose/preflight/backup verify和当前格式启动会校验审计表必要字段/主键/唯一索引、标记、事件schema/ID/时间对应、10000条上限以及pending的committed保证与已投递冲突。当前格式缺表、损坏payload或索引拒绝，不静默重建丢失记录。合法旧无审计库/955 ledger是已审阅迁移输入；无版本标记却有pending的混合状态拒绝。离线允许合法积压和已持久缺口，以便停写快照/恢复；因此离线ready仅证明快照可验证，不等于在线audit健康，启动后须检查owner readiness。联合SQLite备份包含未投递意图和缺口标记；恢复后当前软件有界重放并继续要求owner确认，原reader撤销/当前权限复核仍适用。审计不能知道快照之后的成员撤权、法规删除或OS操作，不替代原备份授权流程。
 
 本批实际故障测试覆盖：真实SIGKILL发生在意图已插入而COMMIT前、COMMIT后和sink事务中；重复/冲突投递；意图失败回滚来源/token/import/queue与发布head；SQLite页预算造成真实SQLITE_FULL回滚；10000队列上限与重启；sink错误/circuit/owner恢复/readiness；秘密/正文不进记录。SQLITE_FULL是受控页预算测试，不是物理磁盘拔出；进程SIGKILL不是物理断电。完整check、浏览器及部署/恢复演练以本轮执行记录为准。身份/RBAC继续暂停，外部sink/OS隔离另见[出站审计](EGRESS_AUDIT.md)和[产品门槛](PRODUCT_READINESS.md)。
