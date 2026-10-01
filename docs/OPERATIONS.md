@@ -17,3 +17,5 @@
 /api/health仅证明进程存活；owner-only /api/readiness核对DB/schema/content/checkpoint/index/scheduler，依赖失败503且不暴露正文或路径。pnpm cli readiness提供JSON与非零失败退出；停机可用pnpm admin diagnose。X-Request-Id与错误correlationId一致，但仍没有指标/告警、SLO或完整操作者安全审计。项目只读token和secretRef不能替代SSO、团队RBAC或KMS；不开放公网。
 
 Git和静态插件是可信native边界，没有OS/网络沙箱、DNS重绑定防护或磁盘quota。完整保留/删除、供应链扫描、真实飞书与认证模型Agent E2E仍缺失。参见[产品就绪矩阵](PRODUCT_READINESS.md)，不要把单机合成测试结论扩大到生产。
+
+首装、停写升级预检与安全审查步骤见[部署安全与演练](DEPLOYMENT_SECURITY.md)，`pnpm preflight`和`pnpm drill:deploy`不修改用户OS/TLS/自启。

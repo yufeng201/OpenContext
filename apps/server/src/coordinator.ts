@@ -1,3 +1,4 @@
+import { safeErrorCode } from '@opencontext/contracts/errors';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -79,12 +80,9 @@ export class Coordinator {
       } catch (error) {
         if (!this.abort.signal.aborted) {
           // Persist stable diagnostics, not raw process output or URLs/tokens.
-          const code =
-            error instanceof Error
-              ? /^[A-Z][A-Z0-9_]+/.exec(error.message)?.[0]
-              : null;
+          const code = safeErrorCode(error, 'PROCESSING_FAILED');
           try {
-            this.catalog.failRun(run, code ?? 'PROCESSING_FAILED');
+            this.catalog.failRun(run, code);
           } catch {
             /* revoked/lost lease already has a newer owner */
           }

@@ -1,3 +1,4 @@
+import { noLinks } from '../packages/state-sqlite/src/maintenance.ts';
 import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { QueryOpenApi } from '../packages/contracts/src/query-api.ts';
@@ -11,6 +12,7 @@ const pages = [
   ['plugins', '插件开发', 'PLUGIN_DEVELOPMENT.md'],
   ['operations', '运维与安全', 'OPERATIONS.md'],
   ['backup-recovery', '备份恢复与诊断', 'BACKUP_RECOVERY.md'],
+  ['deployment-security', '部署与安全门槛', 'DEPLOYMENT_SECURITY.md'],
   ['readiness', '产品就绪矩阵', 'PRODUCT_READINESS.md'],
 ] as const;
 const output = resolve('apps/docs/dist');
@@ -116,6 +118,7 @@ function markdown(source: string): string {
   return result;
 }
 // Only this generated output directory is replaced. No runtime/user/source data.
+noLinks(output);
 rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
 writeFileSync(

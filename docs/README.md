@@ -39,3 +39,5 @@ PRD AC-01–AC-22、用户流程 UJ-01–UJ-13 仍是待实现的应用验收。
 新增：[查询接入](QUERY_ACCESS.md)、[核心概念](CORE_CONCEPTS.md)、[当前运维边界](OPERATIONS.md)。本地文档站使用`pnpm docs:build`/`pnpm docs:preview`，复用这些指南，不公开发布。
 
 - [停写备份、恢复与依赖诊断](BACKUP_RECOVERY.md)：v1快照、仅新目录恢复、撤权与合成演练。
+
+- [私有部署与安全门槛](DEPLOYMENT_SECURITY.md)：首装/升级预检、TLS前置、已复现风险与SSO决策边界。

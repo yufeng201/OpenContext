@@ -1,3 +1,4 @@
+import { safeErrorCode } from '@opencontext/contracts/errors';
 import {
   createHash,
   randomBytes,
@@ -43,6 +44,13 @@ function str(row: Row, key: string): string {
 
 function nullable(row: Row, key: string): string | null {
   return row[key] === null ? null : str(row, key);
+}
+
+function diagnostic(row: Row, key: string): string | null {
+  const value = nullable(row, key);
+  return value === null
+    ? null
+    : safeErrorCode(new Error(value), 'PROCESSING_FAILED');
 }
 
 function isBusy(error: unknown): boolean {
@@ -502,7 +510,7 @@ export class Catalog {
       processor,
       active: row.active === 1,
       sourceVersion: nullable(row, 'source_version'),
-      lastError: nullable(row, 'last_error'),
+      lastError: diagnostic(row, 'last_error'),
     };
   }
 
@@ -680,6 +688,14 @@ export class Catalog {
         )
         .get(bindingId, kind);
       if (existing) return this.run(existing);
+      const queued = Number(
+        this.db
+          .prepare(
+            "SELECT count(*) AS n FROM runs WHERE state IN ('queued','running')",
+          )
+          .get()?.n,
+      );
+      if (queued >= 100) throw new Error('QUEUE_FULL');
       const execution: ExecutionLock = {
         instance,
         imports: this.listImports(bindingId),
@@ -728,7 +744,7 @@ export class Catalog {
       incarnation: str(row, 'incarnation'),
       inputCommit: nullable(row, 'input_commit'),
       resultCommit: nullable(row, 'result_commit'),
-      error: nullable(row, 'error'),
+      error: diagnostic(row, 'error'),
       createdAt: str(row, 'created_at'),
       skipped: JSON.parse(str(row, 'skipped_json')) as {
         path: string;

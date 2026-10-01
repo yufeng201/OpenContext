@@ -28,7 +28,9 @@
     "docs:build": "node scripts/build-docs.ts",
     "docs:preview": "node scripts/preview-docs.ts",
     "admin": "node scripts/admin.ts",
-    "drill:restore": "node scripts/restore-drill.ts"
+    "drill:restore": "node scripts/restore-drill.ts",
+    "preflight": "node scripts/preflight.ts",
+    "drill:deploy": "node scripts/deployment-drill.ts"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",

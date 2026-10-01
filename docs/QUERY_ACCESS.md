@@ -25,7 +25,7 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 ## TypeScript源码SDK
 
-`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是仓库内私有源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect并限时15秒，以免Bearer跟随跳转。
+`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是仓库内私有源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect并默认限时15秒；timeoutMs可在10–15000毫秒内缩短。解码响应上限16MiB，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
 
 方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。查询正文响应目前是TS契约断言，尚无客户端运行时response schema校验；readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 

@@ -1,3 +1,6 @@
+import { parsePublicOrigin } from './deployment.ts';
+import { safeErrorCode } from '@opencontext/contracts/errors';
+import { readStaticAsset } from './static.ts';
 import { parseReadinessReport } from '@opencontext/contracts/maintenance';
 import {
   assertCompleteRoot,
@@ -6,7 +9,7 @@ import {
 import { QueryRoutes, QueryOpenApi } from '@opencontext/contracts/query-api';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname } from 'node:path';
 import {
   CreateProjectSchema,
@@ -44,9 +47,12 @@ export type ApplicationOptions = {
   dataRoot: string;
   dataMode?: 'demo' | 'private';
   ownerToken: string;
+  publicOrigin?: string;
   allowedLocalRepoRoot?: string;
   webRoot?: string;
   autoStart?: boolean;
+  /** Server-owned deadline; clients cannot choose resource budgets. */
+  connectionTestTimeoutMs?: number;
   registry?: StaticRegistry;
   /** Reviewed server-side dependency injection; never accepted by a client body. */
   feishu?: Omit<FeishuChatOptions, 'stateRoot'>;
@@ -55,7 +61,17 @@ export function createApplication(options: ApplicationOptions) {
   if (options.ownerToken.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
   if (options.ownerToken.length > MAX_AUTH_TOKEN_LENGTH)
     throw new Error('OWNER_TOKEN_TOO_LONG');
+  if (!/^[!-~]+$/.test(options.ownerToken))
+    throw new Error('INVALID_OWNER_TOKEN');
+  const publicOrigin = options.publicOrigin
+    ? parsePublicOrigin(options.publicOrigin)
+    : undefined;
   assertCompleteRoot(options.dataRoot);
+  if (
+    existsSync(options.dataRoot) &&
+    (statSync(options.dataRoot).mode & 0o077) !== 0
+  )
+    throw new Error('ROOT_PERMISSIONS_UNSAFE');
   const registry =
     options.registry ?? createDefaultRegistry(options.dataRoot, options.feishu);
   mkdirSync(options.dataRoot, { recursive: true, mode: 0o700 });
@@ -78,9 +94,21 @@ export function createApplication(options: ApplicationOptions) {
     registry,
     options.allowedLocalRepoRoot,
   );
+  const connectionTestTimeoutMs = options.connectionTestTimeoutMs ?? 15_000;
+  if (
+    !Number.isInteger(connectionTestTimeoutMs) ||
+    connectionTestTimeoutMs < 10 ||
+    connectionTestTimeoutMs > 15_000
+  )
+    throw new Error('INVALID_TIMEOUT');
+  let connectionTests = 0;
   const app = Fastify({
     logger: false,
     bodyLimit: 65_536,
+    requestTimeout: 10_000,
+    connectionTimeout: 20_000,
+    keepAliveTimeout: 5_000,
+    maxRequestsPerSocket: 100,
     trustProxy: false,
     genReqId: () => randomUUID(),
     requestIdHeader: false,
@@ -250,14 +278,30 @@ export function createApplication(options: ApplicationOptions) {
     const host = request.headers.host ?? '';
     let hostname: string;
     try {
-      hostname = new URL('http://' + host).hostname;
+      const authority = new URL('http://' + host);
+      if (
+        authority.username ||
+        authority.password ||
+        authority.pathname !== '/' ||
+        authority.search ||
+        authority.hash
+      )
+        throw new Error('UNTRUSTED_HOST');
+      hostname = authority.hostname;
     } catch {
       return done(new Error('UNTRUSTED_HOST'));
     }
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(hostname))
-      return done(new Error('UNTRUSTED_HOST'));
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
+    const proxy =
+      publicOrigin && new URL('https://' + host).host === publicOrigin.host;
+    if (!local && !proxy) return done(new Error('UNTRUSTED_HOST'));
     const origin = request.headers.origin;
-    if (origin && origin !== 'http://' + host && origin !== 'https://' + host)
+    if (
+      origin &&
+      !(proxy
+        ? origin === publicOrigin!.origin
+        : origin === 'http://' + host || origin === 'https://' + host)
+    )
       return done(new Error('UNTRUSTED_ORIGIN'));
     done();
   });
@@ -266,58 +310,65 @@ export function createApplication(options: ApplicationOptions) {
     done();
   });
   app.setErrorHandler((error, request, reply) => {
-    const message = error instanceof Error ? error.message : '';
     const frameworkCode =
       error && typeof error === 'object' && 'code' in error ? error.code : null;
     const code =
-      frameworkCode === 'FST_ERR_CTP_BODY_TOO_LARGE'
-        ? 'PAYLOAD_TOO_LARGE'
-        : frameworkCode === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
-            frameworkCode === 'FST_ERR_CTP_EMPTY_JSON_BODY'
-          ? 'INVALID_JSON'
-          : error && typeof error === 'object' && 'validation' in error
-            ? 'INVALID_SCHEMA'
-            : /^[A-Z][A-Z0-9_]+$/.test(message)
-              ? message
-              : 'INTERNAL_ERROR';
+      frameworkCode === 'FST_ERR_CTP_INVALID_MEDIA_TYPE'
+        ? 'UNSUPPORTED_MEDIA_TYPE'
+        : frameworkCode === 'FST_ERR_CTP_BODY_TOO_LARGE'
+          ? 'PAYLOAD_TOO_LARGE'
+          : frameworkCode === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+              frameworkCode === 'FST_ERR_CTP_EMPTY_JSON_BODY'
+            ? 'INVALID_JSON'
+            : error && typeof error === 'object' && 'validation' in error
+              ? 'INVALID_SCHEMA'
+              : safeErrorCode(error);
     const status =
-      code === 'PAYLOAD_TOO_LARGE'
-        ? 413
-        : code === 'UNAUTHORIZED'
-          ? 401
-          : ['FORBIDDEN', 'UNTRUSTED_HOST', 'UNTRUSTED_ORIGIN'].includes(code)
-            ? 403
-            : code === 'NOT_FOUND'
-              ? 404
-              : [
-                    'HEAD_MOVED',
-                    'OUTPUT_CONFLICT',
-                    'LEASE_LOST',
-                    'BINDING_REVOKED',
-                    'IMPORT_CONFLICT',
-                    'INPUT_CHANGED',
-                    'PLUGIN_LOCK_MISMATCH',
-                    'PLUGIN_ARTIFACT_CHANGED',
-                  ].includes(code)
-                ? 409
-                : code === 'INVALID_SCHEMA' ||
-                    /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+      code === 'UNSUPPORTED_MEDIA_TYPE'
+        ? 415
+        : code === 'PAYLOAD_TOO_LARGE'
+          ? 413
+          : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
+            ? 429
+            : code === 'CONNECTION_TEST_TIMEOUT'
+              ? 503
+              : code === 'UNAUTHORIZED'
+                ? 401
+                : ['FORBIDDEN', 'UNTRUSTED_HOST', 'UNTRUSTED_ORIGIN'].includes(
                       code,
-                    ) ||
-                    code.startsWith('INVALID_') ||
-                    [
-                      'IMPORT_LIMIT',
-                      'IMPORTS_NOT_SUPPORTED',
-                      'PLUGIN_NOT_FOUND',
-                      'UNKNOWN_PLUGIN',
-                      'PLUGIN_CAPABILITY_MISMATCH',
-                      'CAPABILITY_OR_INSTANCE_MISMATCH',
-                      'CAPABILITY_MISSING',
-                      'PLUGIN_UNAVAILABLE',
-                      'CONNECTION_TEST_UNSUPPORTED',
-                    ].includes(code)
-                  ? 400
-                  : 500;
+                    )
+                  ? 403
+                  : code === 'NOT_FOUND'
+                    ? 404
+                    : [
+                          'HEAD_MOVED',
+                          'OUTPUT_CONFLICT',
+                          'LEASE_LOST',
+                          'BINDING_REVOKED',
+                          'IMPORT_CONFLICT',
+                          'INPUT_CHANGED',
+                          'PLUGIN_LOCK_MISMATCH',
+                          'PLUGIN_ARTIFACT_CHANGED',
+                        ].includes(code)
+                      ? 409
+                      : code === 'INVALID_SCHEMA' ||
+                          /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+                            code,
+                          ) ||
+                          code.startsWith('INVALID_') ||
+                          [
+                            'IMPORT_LIMIT',
+                            'IMPORTS_NOT_SUPPORTED',
+                            'PLUGIN_NOT_FOUND',
+                            'UNKNOWN_PLUGIN',
+                            'PLUGIN_CAPABILITY_MISMATCH',
+                            'CAPABILITY_OR_INSTANCE_MISMATCH',
+                            'CAPABILITY_MISSING',
+                            'PLUGIN_UNAVAILABLE',
+                            'CONNECTION_TEST_UNSUPPORTED',
+                          ].includes(code)
+                        ? 400
+                        : 500;
     void reply.code(status).send({
       error: {
         code,
@@ -360,7 +411,8 @@ export function createApplication(options: ApplicationOptions) {
         'Set-Cookie',
         'oc_session=' +
           encodeURIComponent(request.body.token) +
-          '; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800',
+          '; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800' +
+          (publicOrigin ? '; Secure' : ''),
       );
       return principal;
     },
@@ -369,7 +421,8 @@ export function createApplication(options: ApplicationOptions) {
   app.delete('/api/session', (_request, reply) => {
     reply.header(
       'Set-Cookie',
-      'oc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+      'oc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' +
+        (publicOrigin ? '; Secure' : ''),
     );
     return { ok: true };
   });
@@ -452,13 +505,34 @@ export function createApplication(options: ApplicationOptions) {
       const binding = bindingGate(request);
       if (!binding.active) throw new Error('BINDING_REVOKED');
       if (!binding.connector) throw new Error('CONNECTION_TEST_UNSUPPORTED');
-      const result = await registry.testConnection(
+      if (connectionTests >= 4) throw new Error('RESOURCE_BUSY');
+      connectionTests++;
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const operation = registry.testConnection(
         binding.connector,
-        AbortSignal.timeout(15_000),
+        controller.signal,
       );
-      const current = bindingGate(request);
-      if (!current.active) throw new Error('BINDING_REVOKED');
-      return result;
+      // A native plugin that ignores cancellation keeps its slot until settlement.
+      // This bounds continuing work even after the HTTP deadline has elapsed.
+      void operation.then(
+        () => connectionTests--,
+        () => connectionTests--,
+      );
+      try {
+        const deadline = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('CONNECTION_TEST_TIMEOUT'));
+            controller.abort();
+          }, connectionTestTimeoutMs);
+        });
+        const result = await Promise.race([operation, deadline]);
+        const current = bindingGate(request);
+        if (!current.active) throw new Error('BINDING_REVOKED');
+        return result;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     },
   );
   app.post<{ Params: BindingParams; Body: ImportUploadInput }>(
@@ -482,16 +556,11 @@ export function createApplication(options: ApplicationOptions) {
       try {
         await registry.validateImport(binding.connector, request.body.content);
       } catch (error) {
-        const code =
-          error instanceof Error
-            ? /^[A-Z][A-Z0-9_]+(?::|$)/
-                .exec(error.message)?.[0]
-                .replace(/:$/, '')
-            : undefined;
+        const code = safeErrorCode(error, 'INVALID_IMPORT');
         // Do not retain arbitrary native-plugin diagnostics containing imported
         // text or credentials in the HTTP error chain; expose only a stable code.
         // eslint-disable-next-line preserve-caught-error
-        throw new Error(code ?? 'INVALID_IMPORT');
+        throw new Error(code);
       }
       bindingGate(request);
       if (!catalog.getBinding(binding.id)?.active)
@@ -612,7 +681,7 @@ export function createApplication(options: ApplicationOptions) {
     return reply
       .type(types[extname(path)] ?? 'application/octet-stream')
       .header('X-Content-Type-Options', 'nosniff')
-      .send(readFileSync(path));
+      .send(readStaticAsset(webRoot, path));
   });
   app.addHook('onClose', async () => {
     await coordinator.stop();

@@ -1,5 +1,6 @@
+import { readStaticAsset } from '../apps/server/src/static.ts';
 import { createServer } from 'node:http';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 const root = resolve('apps/docs/dist');
 if (!existsSync(resolve(root, 'index.html')))
@@ -22,6 +23,13 @@ const server = createServer((request, response) => {
     response.writeHead(404).end('Not found');
     return;
   }
+  let body: Buffer;
+  try {
+    body = readStaticAsset(root, resolve(root, file));
+  } catch {
+    response.writeHead(404).end('Not found');
+    return;
+  }
   response.setHeader(
     'Content-Type',
     file.endsWith('.html')
@@ -37,7 +45,7 @@ const server = createServer((request, response) => {
     "default-src 'none'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'",
   );
   response.setHeader('X-Content-Type-Options', 'nosniff');
-  response.end(readFileSync(resolve(root, file)));
+  response.end(body);
 });
 server.listen(Number(process.env['DOCS_PORT'] ?? '4400'), '127.0.0.1', () =>
   console.log(
