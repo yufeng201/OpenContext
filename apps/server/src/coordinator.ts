@@ -7,6 +7,7 @@ import type {
   FileEntry,
   ProcessorOutput,
   Run,
+  ImportedObjectRef,
 } from '@opencontext/contracts';
 import {
   safeRelativePath,
@@ -16,8 +17,7 @@ import {
 import { FileStore } from '@opencontext/storage-fs';
 import { Catalog } from '@opencontext/state-sqlite';
 import { TextIndex } from '@opencontext/retrieval';
-import { repoConnector } from '@opencontext/repo-connector';
-import { markdownProcessor } from '@opencontext/markdown-processor';
+import { StaticRegistry } from '@opencontext/plugin-host';
 
 export class Coordinator {
   readonly catalog: Catalog;
@@ -25,6 +25,7 @@ export class Coordinator {
   readonly index: TextIndex;
   private readonly dataRoot: string;
   private readonly localRoot: string | undefined;
+  private readonly registry: StaticRegistry;
   private active: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly abort = new AbortController();
@@ -35,11 +36,13 @@ export class Coordinator {
     catalog: Catalog,
     store: FileStore,
     dataRoot: string,
+    registry: StaticRegistry,
     allowedLocalRepoRoot?: string,
   ) {
     this.catalog = catalog;
     this.store = store;
     this.dataRoot = dataRoot;
+    this.registry = registry;
     this.localRoot = allowedLocalRepoRoot;
     this.index = new TextIndex(catalog.db);
   }
@@ -115,6 +118,13 @@ export class Coordinator {
   private async execute(run: Run): Promise<void> {
     const binding = this.catalog.getBinding(run.bindingId);
     if (!binding?.active) throw new Error('BINDING_REVOKED');
+    const execution = run.execution;
+    if (!execution) throw new Error('LEGACY_RUN_REQUIRES_RETRY');
+    const capability = run.kind === 'sync' ? 'connector' : 'processor';
+    this.registry.resolve(execution.instance, capability);
+    const allowedImports = new Map(
+      execution.imports.map((ref) => [ref.id, JSON.stringify(ref)]),
+    );
     const base = this.catalog.currentFiles(run.projectId);
     const workDir = resolve(this.dataRoot, 'staging', run.id + '-' + run.fence);
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
@@ -123,6 +133,15 @@ export class Coordinator {
       signal: AbortSignal.any([this.abort.signal, attemptAbort.signal]),
       workDir,
       ...(this.localRoot ? { allowedLocalRepoRoot: this.localRoot } : {}),
+      readImport: async (ref: ImportedObjectRef): Promise<string> => {
+        if (attemptAbort.signal.aborted || this.abort.signal.aborted)
+          throw new Error('CANCELLED');
+        if (!this.catalog.getBinding(binding.id)?.active)
+          throw new Error('BINDING_REVOKED');
+        if (allowedImports.get(ref.id) !== JSON.stringify(ref))
+          throw new Error('IMPORT_ACCESS_DENIED');
+        return this.store.readText(ref.contentHash);
+      },
     };
     const heartbeat = setInterval(() => {
       try {
@@ -136,15 +155,11 @@ export class Coordinator {
     try {
       let desired: FileEntry[], sourceVersion: string | undefined;
       if (run.kind === 'sync') {
-        if (
-          !repoConnector.probe().available ||
-          binding.packageRef !==
-            repoConnector.manifest.id + '@' + repoConnector.manifest.version
-        )
-          throw new Error('CAPABILITY_MISSING');
-        const output = await repoConnector.invoke(
+        const output = await this.registry.invokeConnector(
+          execution.instance,
           {
-            ...binding.config,
+            config: execution.instance.config,
+            imports: execution.imports,
             previousVersion: binding.sourceVersion,
             maxFiles: 500,
             maxBytes: 10_485_760,
@@ -171,8 +186,10 @@ export class Coordinator {
             file.freshness === 'fresh',
         );
         this.verifyInputs(inputs, base, binding.id);
-        const output = await markdownProcessor.invoke(
+        const output = await this.registry.invokeProcessor(
+          execution.instance,
           {
+            config: execution.instance.config,
             projectId: run.projectId,
             bindingId: binding.id,
             inputCommitId: run.inputCommit,

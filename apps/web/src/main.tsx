@@ -15,7 +15,8 @@ const queryClient = new QueryClient({
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      {/* Directory and filter actions must share the committed URL state. */}
+      <BrowserRouter useTransitions={false}>
         <App />
       </BrowserRouter>
     </QueryClientProvider>

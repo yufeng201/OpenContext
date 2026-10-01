@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
+import { Type } from '@sinclair/typebox';
 import type { ProcessorInput, ProcessorOutput } from '@opencontext/contracts';
-import type { OfficialPlugin } from '@opencontext/plugin-sdk';
+import type {
+  OfficialPlugin,
+  ProcessorDefinition,
+} from '@opencontext/plugin-sdk';
 
 function literal(value: string): string {
   return value
@@ -121,4 +125,18 @@ export const markdownProcessor: OfficialPlugin<
     });
     return { mode: 'full', complete: true, outputs };
   },
+};
+
+export const markdownDefinition: ProcessorDefinition = {
+  manifest: markdownProcessor.manifest,
+  capability: 'processor',
+  artifactPaths: [import.meta.url],
+  title: 'Markdown 导航',
+  description:
+    'Deterministic source excerpts with fixed revision references; no model call.',
+  configSchema: Type.Object({}, { additionalProperties: false }),
+  fields: [],
+  acceptsImports: false,
+  probe: () => markdownProcessor.probe(),
+  invoke: (input, context) => markdownProcessor.invoke(input, context),
 };

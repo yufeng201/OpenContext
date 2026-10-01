@@ -27,9 +27,8 @@ async function loginAt(page: Page, projectId: string) {
   );
   await page.getByLabel('访问 token').fill(ownerToken!);
   await page.getByRole('button', { name: '连接空间', exact: true }).click();
-  await expect(
-    page.getByRole('heading', { name: '添加 Git 仓库' }),
-  ).toBeVisible();
+  await page.getByRole('button', { name: '新增数据源' }).click();
+  await expect(page.getByRole('heading', { name: '添加来源' })).toBeVisible();
 }
 
 test('switching projects resets the source draft to the new project defaults', async ({
@@ -42,6 +41,11 @@ test('switching projects resets the source draft to the new project defaults', a
   await page.getByLabel('仓库地址').fill(repoUrl!);
   await page.getByLabel('分支', { exact: true }).fill('draft-a');
   await page.getByLabel('当前空间').selectOption(b.id);
+  await page
+    .getByRole('navigation', { name: '主要导航' })
+    .getByRole('link', { name: '数据源', exact: true })
+    .click();
+  await page.getByRole('button', { name: '新增数据源' }).click();
 
   await expect(page.getByLabel('来源名称')).toHaveValue('');
   await expect(page.getByLabel('仓库地址')).toHaveValue('');
@@ -81,6 +85,11 @@ test('a delayed real create response from A cannot reset the new draft in B', as
     await page.getByRole('button', { name: '添加来源', exact: true }).click();
     await expect.poll(() => responseHeld).toBe(true);
     await page.getByLabel('当前空间').selectOption(b.id);
+    await page
+      .getByRole('navigation', { name: '主要导航' })
+      .getByRole('link', { name: '数据源', exact: true })
+      .click();
+    await page.getByRole('button', { name: '新增数据源' }).click();
     await page.getByLabel('来源名称').fill('Unsaved B draft');
     await page.getByLabel('仓库地址').fill(repoUrl!);
     await page.getByLabel('分支', { exact: true }).fill('draft-b');

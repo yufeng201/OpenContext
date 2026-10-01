@@ -7,6 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@opencontext/contracts": "workspace:*"
+    "@opencontext/contracts": "workspace:*",
+    "@sinclair/typebox": "0.34.52"
   }
 }

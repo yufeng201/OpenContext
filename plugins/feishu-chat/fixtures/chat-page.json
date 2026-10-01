@@ -1,0 +1,21 @@
+{
+  "code": 0,
+  "msg": "success",
+  "data": {
+    "items": [
+      {
+        "message_id": "om_synthetic_root",
+        "chat_id": "oc_synthetic",
+        "create_time": "1790758800000",
+        "update_time": "1790758800000",
+        "msg_type": "text",
+        "thread_id": "omt_synthetic_thread",
+        "body": {
+          "content": "{\"text\": \"Decision: Keep revision citations.\\nAction: Write synthetic acceptance checks.\"}"
+        },
+        "deleted": false
+      }
+    ],
+    "has_more": false
+  }
+}

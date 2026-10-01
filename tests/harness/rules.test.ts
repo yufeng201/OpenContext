@@ -17,6 +17,7 @@ test('boundary allows ports/contracts and local modules', () => {
     ['plugins/repo/src/main.ts', '@opencontext/plugin-sdk'],
     ['packages/contracts/src/api.ts', '@sinclair/typebox'],
     ['apps/web/src/view.ts', './local.ts'],
+    ['apps/web/tests/imports.spec.ts', 'node:fs/promises'],
   ])
     assert.deepEqual(
       violations(file!, 'import x from ' + JSON.stringify(specifier)),
@@ -31,6 +32,12 @@ test('boundary rejects direct, relative, export, dynamic, require, import-type v
       'export * from "../../../packages/core/src/files.ts"',
     ],
     ['apps/web/src/view.ts', 'const db = import("node:sqlite")'],
+    ['apps/web/src/view.spec.ts', 'import x from "node:fs/promises"'],
+    ['apps/web/tests/imports.spec.ts', 'import x from "node:sqlite"'],
+    [
+      'apps/web/tests/imports.spec.ts',
+      'import x from "@opencontext/state-sqlite"',
+    ],
     ['packages/core/src/file.ts', 'const f = require("fastify")'],
     ['packages/contracts/src/api.ts', 'import x from "node:fs"'],
     [

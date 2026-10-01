@@ -2,12 +2,17 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { isAbsolute, join, relative, sep } from 'node:path';
+import { Type } from '@sinclair/typebox';
 import type {
   ConnectorInput,
   ConnectorOutput,
   SourceFile,
 } from '@opencontext/contracts';
-import type { ExecutionContext, OfficialPlugin } from '@opencontext/plugin-sdk';
+import type {
+  ConnectorDefinition,
+  ExecutionContext,
+  OfficialPlugin,
+} from '@opencontext/plugin-sdk';
 
 const MAX_SINGLE_FILE_BYTES = 1_048_576;
 const MAX_TREE_BYTES = 8_388_608;
@@ -517,5 +522,55 @@ export const repoConnector: OfficialPlugin<ConnectorInput, ConnectorOutput> = {
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
+  },
+};
+
+/** The registry-facing adapter owns Git-specific configuration, not the coordinator. */
+export const repoDefinition: ConnectorDefinition = {
+  manifest: repoConnector.manifest,
+  capability: 'connector',
+  artifactPaths: [import.meta.url],
+  title: 'Git 仓库',
+  description: 'Import one public HTTPS branch as a supported text snapshot.',
+  configSchema: Type.Object(
+    {
+      repoUrl: Type.String({ minLength: 1, maxLength: 2000 }),
+      branch: Type.String({ minLength: 1, maxLength: 200, default: 'main' }),
+    },
+    { additionalProperties: false },
+  ),
+  fields: [
+    {
+      key: 'repoUrl',
+      label: '仓库地址',
+      kind: 'text',
+      placeholder: 'https://github.com/owner/repository.git',
+    },
+    { key: 'branch', label: '分支', kind: 'text', default: 'main' },
+  ],
+  acceptsImports: false,
+  recommendedProcessorRef: 'org.opencontext.markdown@0.1.0',
+  probe: () => repoConnector.probe(),
+  async validateConfig(config, context) {
+    try {
+      await resolveSource(
+        config['repoUrl'] as string,
+        context.allowedLocalRepoRoot,
+      );
+    } catch {
+      throw new Error('INVALID_SOURCE');
+    }
+  },
+  invoke(input, context) {
+    return repoConnector.invoke(
+      {
+        repoUrl: input.config['repoUrl'] as string,
+        branch: input.config['branch'] as string,
+        previousVersion: input.previousVersion,
+        maxFiles: input.maxFiles,
+        maxBytes: input.maxBytes,
+      },
+      context,
+    );
   },
 };

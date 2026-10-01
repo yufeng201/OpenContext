@@ -8,36 +8,67 @@ import {
   SearchSchema,
   LoginSchema,
   ReadSchema,
+  MAX_AUTH_TOKEN_LENGTH,
+  CreatePluginBindingSchema,
+  ImportUploadSchema,
 } from '@opencontext/contracts';
 import type {
   CreateBindingInput,
   Principal,
   ReadResult,
   SearchInput,
+  CreatePluginBindingInput,
+  ImportUploadInput,
 } from '@opencontext/contracts';
 import { Catalog } from '@opencontext/state-sqlite';
 import { FileStore } from '@opencontext/storage-fs';
 import { search } from '@opencontext/retrieval';
 import { registerMcp } from '@opencontext/mcp';
 import { Coordinator } from './coordinator.ts';
-import { resolveSource } from '@opencontext/repo-connector';
+import type { StaticRegistry } from '@opencontext/plugin-host';
+import type { FeishuChatOptions } from '@opencontext/feishu-chat';
+import { Type } from '@sinclair/typebox';
+import {
+  createDefaultRegistry,
+  bindingSelection,
+  prepareLegacyBinding,
+} from './plugins.ts';
 
 export type ApplicationOptions = {
   dataRoot: string;
+  dataMode?: 'demo' | 'private';
   ownerToken: string;
   allowedLocalRepoRoot?: string;
   webRoot?: string;
   autoStart?: boolean;
+  registry?: StaticRegistry;
+  /** Reviewed server-side dependency injection; never accepted by a client body. */
+  feishu?: Omit<FeishuChatOptions, 'stateRoot'>;
 };
 export function createApplication(options: ApplicationOptions) {
   if (options.ownerToken.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
+  if (options.ownerToken.length > MAX_AUTH_TOKEN_LENGTH)
+    throw new Error('OWNER_TOKEN_TOO_LONG');
+  const registry =
+    options.registry ?? createDefaultRegistry(options.dataRoot, options.feishu);
   mkdirSync(options.dataRoot, { recursive: true, mode: 0o700 });
-  const catalog = new Catalog(resolve(options.dataRoot, 'control.sqlite'));
+  const catalog = new Catalog(resolve(options.dataRoot, 'control.sqlite'), {
+    mode: options.dataMode ?? 'private',
+  });
+  try {
+    catalog.migrateLegacyBindings((binding) =>
+      prepareLegacyBinding(registry, binding),
+    );
+  } catch (error) {
+    catalog.close();
+    throw error;
+  }
   const store = new FileStore(options.dataRoot);
   const coordinator = new Coordinator(
     catalog,
     store,
     options.dataRoot,
+    registry,
     options.allowedLocalRepoRoot,
   );
   const app = Fastify({
@@ -111,9 +142,10 @@ export function createApplication(options: ApplicationOptions) {
       revisionId: string,
     ): ReadResult {
       authorize(principal, projectId);
-      const current = catalog
-        .currentFiles(projectId)
-        .find((file) => file.fileId === fileId);
+      const currentFiles = new Map(
+        catalog.currentFiles(projectId).map((file) => [file.fileId, file]),
+      );
+      const current = currentFiles.get(fileId);
       // Explicit source history survives deletion. Invalid derived content does
       // not become readable again when a later full output set tombstones it.
       if (
@@ -127,9 +159,7 @@ export function createApplication(options: ApplicationOptions) {
       if (
         !revision ||
         revision.derivedFrom.some((dep) => {
-          const origin = catalog
-            .currentFiles(projectId)
-            .find((file) => file.fileId === dep.fileId);
+          const origin = currentFiles.get(dep.fileId);
           return (
             !origin ||
             !catalog.getBinding(origin.bindingId)?.active ||
@@ -139,10 +169,26 @@ export function createApplication(options: ApplicationOptions) {
         })
       )
         throw new Error('NOT_FOUND');
-      const file =
-        current.revisionId === revisionId
-          ? current
-          : { ...revision, freshness: current.freshness };
+      // Evaluate the requested revision. Regenerating a current output cannot
+      // make an older output (or its old inputs) fresh again.
+      const freshness: ReadResult['file']['freshness'] =
+        current.freshness === 'invalid'
+          ? 'invalid'
+          : current.revisionId !== revisionId ||
+              current.freshness === 'stale' ||
+              revision.derivedFrom.some((dep) => {
+                const origin = currentFiles.get(dep.fileId)!;
+                return (
+                  origin.revisionId !== dep.revisionId ||
+                  origin.freshness !== 'fresh'
+                );
+              })
+            ? 'stale'
+            : 'fresh';
+      const file: ReadResult['file'] = {
+        ...(current.revisionId === revisionId ? current : revision),
+        freshness,
+      };
       const commitId =
         current.revisionId === revisionId
           ? catalog.head(projectId)
@@ -235,9 +281,28 @@ export function createApplication(options: ApplicationOptions) {
                     'OUTPUT_CONFLICT',
                     'LEASE_LOST',
                     'BINDING_REVOKED',
+                    'IMPORT_CONFLICT',
+                    'INPUT_CHANGED',
+                    'PLUGIN_LOCK_MISMATCH',
+                    'PLUGIN_ARTIFACT_CHANGED',
                   ].includes(code)
                 ? 409
-                : code === 'INVALID_SCHEMA' || code.startsWith('INVALID_')
+                : code === 'INVALID_SCHEMA' ||
+                    /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+                      code,
+                    ) ||
+                    code.startsWith('INVALID_') ||
+                    [
+                      'IMPORT_LIMIT',
+                      'IMPORTS_NOT_SUPPORTED',
+                      'PLUGIN_NOT_FOUND',
+                      'UNKNOWN_PLUGIN',
+                      'PLUGIN_CAPABILITY_MISMATCH',
+                      'CAPABILITY_OR_INSTANCE_MISMATCH',
+                      'CAPABILITY_MISSING',
+                      'PLUGIN_UNAVAILABLE',
+                      'CONNECTION_TEST_UNSUPPORTED',
+                    ].includes(code)
                   ? 400
                   : 500;
     void reply.code(status).send({
@@ -289,6 +354,10 @@ export function createApplication(options: ApplicationOptions) {
   );
   type ProjectParams = { id: string };
   type BindingParams = { id: string; bindingId: string };
+  app.get('/api/plugins', (request) => {
+    authorize(authenticate(request), undefined, true);
+    return registry.list();
+  });
   app.get<{ Params: ProjectParams }>(
     '/api/projects/:id/bindings',
     (request) => {
@@ -299,19 +368,37 @@ export function createApplication(options: ApplicationOptions) {
         .filter((binding) => principal.role === 'owner' || binding.active);
     },
   );
-  app.post<{ Params: ProjectParams; Body: CreateBindingInput }>(
+  app.post<{
+    Params: ProjectParams;
+    Body: CreateBindingInput | CreatePluginBindingInput;
+  }>(
     '/api/projects/:id/bindings',
-    { schema: { body: CreateBindingSchema } },
+    {
+      schema: {
+        body: Type.Union([CreateBindingSchema, CreatePluginBindingSchema]),
+      },
+    },
     async (request) => {
       authorize(authenticate(request), request.params.id, true);
-      // Validate before persistence: secrets in URL userinfo/query must never
-      // enter the catalog or reader-visible source metadata. No network access.
-      try {
-        await resolveSource(request.body.repoUrl, options.allowedLocalRepoRoot);
-      } catch {
-        throw new Error('INVALID_SOURCE');
-      }
-      return catalog.createBinding(request.params.id, request.body);
+      const selection = bindingSelection(request.body);
+      const context = options.allowedLocalRepoRoot
+        ? { allowedLocalRepoRoot: options.allowedLocalRepoRoot }
+        : {};
+      const connector = await registry.prepare(
+        selection.connector,
+        'connector',
+        context,
+      );
+      const processor = await registry.prepare(
+        selection.processor,
+        'processor',
+        context,
+      );
+      return catalog.createBinding(request.params.id, {
+        name: selection.name,
+        connector,
+        processor,
+      });
     },
   );
   function bindingGate(request: FastifyRequest<{ Params: BindingParams }>) {
@@ -321,6 +408,81 @@ export function createApplication(options: ApplicationOptions) {
       throw new Error('NOT_FOUND');
     return binding;
   }
+  app.get<{ Params: BindingParams }>(
+    '/api/projects/:id/bindings/:bindingId/imports',
+    (request) => {
+      return catalog.listImports(bindingGate(request).id);
+    },
+  );
+  app.post<{ Params: BindingParams }>(
+    '/api/projects/:id/bindings/:bindingId/test-connection',
+    async (request) => {
+      const binding = bindingGate(request);
+      if (!binding.active) throw new Error('BINDING_REVOKED');
+      if (!binding.connector) throw new Error('CONNECTION_TEST_UNSUPPORTED');
+      const result = await registry.testConnection(
+        binding.connector,
+        AbortSignal.timeout(15_000),
+      );
+      const current = bindingGate(request);
+      if (!current.active) throw new Error('BINDING_REVOKED');
+      return result;
+    },
+  );
+  app.post<{ Params: BindingParams; Body: ImportUploadInput }>(
+    '/api/projects/:id/bindings/:bindingId/imports',
+    { bodyLimit: 2_105_344, schema: { body: ImportUploadSchema } },
+    async (request) => {
+      const binding = bindingGate(request);
+      if (!binding.active) throw new Error('BINDING_REVOKED');
+      if (
+        !binding.connector ||
+        !registry.resolve(binding.connector, 'connector').acceptsImports
+      )
+        throw new Error('IMPORTS_NOT_SUPPORTED');
+      if (Buffer.byteLength(request.body.content) > 1_048_576)
+        throw new Error('PAYLOAD_TOO_LARGE');
+      try {
+        JSON.parse(request.body.content);
+      } catch {
+        throw new Error('INVALID_JSON');
+      }
+      try {
+        await registry.validateImport(binding.connector, request.body.content);
+      } catch (error) {
+        const code =
+          error instanceof Error
+            ? /^[A-Z][A-Z0-9_]+(?::|$)/
+                .exec(error.message)?.[0]
+                .replace(/:$/, '')
+            : undefined;
+        // Do not retain arbitrary native-plugin diagnostics containing imported
+        // text or credentials in the HTTP error chain; expose only a stable code.
+        // eslint-disable-next-line preserve-caught-error
+        throw new Error(code ?? 'INVALID_IMPORT');
+      }
+      bindingGate(request);
+      if (!catalog.getBinding(binding.id)?.active)
+        throw new Error('BINDING_REVOKED');
+      const object = store.putText(request.body.content);
+      return catalog.putImport(
+        binding.id,
+        {
+          id: randomUUID(),
+          filename: request.body.filename,
+          ...object,
+        },
+        request.body.expectedObjectId ?? null,
+      );
+    },
+  );
+  app.delete<{ Params: BindingParams & { objectId: string } }>(
+    '/api/projects/:id/bindings/:bindingId/imports/:objectId',
+    (request) => {
+      catalog.removeImport(bindingGate(request).id, request.params.objectId);
+      return { ok: true };
+    },
+  );
   for (const [action, kind] of [
     ['sync', 'sync'],
     ['process', 'process'],
