@@ -21,3 +21,5 @@ Git和静态插件是可信native边界，没有OS/网络沙箱、DNS重绑定�
 首装、停写升级预检与安全审查步骤见[部署安全与演练](DEPLOYMENT_SECURITY.md)，`pnpm preflight`和`pnpm drill:deploy`不修改用户OS/TLS/自启。
 
 连接器DNS/pin预算、审计导出分页与10000条/30天保留、失败readiness降级见[出站与审计](EGRESS_AUDIT.md)。保留OS隔离及独立审计sink门槛。
+
+关键写入审计持久性、重试/队列与owner故障恢复见[事务审计](AUDIT_DURABILITY.md)。

@@ -36,8 +36,8 @@ curl --fail --header "Authorization: Bearer $OPENCONTEXT_OWNER_TOKEN" \
 
 仅owner可导出；reader403/未认证401。参数`after`默认0、`limit`默认100且最多1000。首次响应带`nextCursor`、`snapshotSequence`；后续页传`after=<nextCursor>&until=<snapshotSequence>`，避免导出动作自身新增事件导致追逐尾部。每页返回`oldestSequence`，裁剪后的序号缺口可见；高水位不是保证保留的锁定快照，并发保留清理可能令页产生缺口。没有SDK/CLI审计导出命令或公开OpenAPI完整管理参考。
 
-默认最多10000条/30天：每次追加事务清理，导出立即过滤超龄记录；实例闲置时物理旧行会等下次追加才清理。SQLite删除不保证安全擦除；备份可保留更旧记录，导出文件由操作员按隐私策略保管。尚无可配置保留/独立擦除/自动导出，不额外创建审计秘密或启用stdout日志。
+已投递记录默认最多10000条/30天（新记录从投递时间计，旧记录兼容time）；pending意图另有10000条上限且未投递前不按年龄裁剪。每次追加事务清理，导出立即过滤超龄记录；实例闲置时物理旧行会等下次追加才清理。SQLite删除不保证安全擦除；备份可保留更旧记录，导出文件由操作员按隐私策略保管。尚无可配置保留/独立擦除/自动导出，不额外创建审计秘密或启用stdout日志。
 
-这是本地可修改的审计基础，响应明确`tamperEvident=false`；同OS账号/DB管理员可改删，时间依赖本机钟，未有签名、链、独立sink、WORM或合规承诺。事件与产品变更未共用事务：崩溃/写审计失败可能留下缺口，不能当exactly-once证据。审计失败不把已完成写入误报回滚，但owner readiness降为503/`AUDIT_UNAVAILABLE`；不能继续声称审计健康。后续须定义真实操作者、事务outbox、失败时是否拒绝新管理写入、导出/告警及法定保留策略。
+这是本地可修改的审计基础，响应明确`tamperEvident=false`；同OS账号/DB管理员可改删，时间依赖本机钟，未有签名、链、独立sink、WORM或合规承诺。本批已对关键管理变更和新内容发布加同事务outbox；只读/拒绝/session等仍有独立日志缺口，不能把所有请求称exactly-once。审计失败不把已完成写入误报回滚，但owner readiness降为503/`AUDIT_UNAVAILABLE`；不能继续声称审计健康。关键写入失败回滚、有界重放/circuit和owner恢复见[事务审计](AUDIT_DURABILITY.md)；后续仍需真实操作者、独立sink/告警及完整法定保留策略。
 
 合成回归覆盖持久化重启、reader拒绝、历史固定读取/撤源404、job/request关联、敏感值不落库、10000/30天裁剪和审计故障readiness降级；完整检查与备份/首装演练另行记录实际结果。下一阶段身份选择见[团队权限决策](TEAM_IDENTITY_DECISION.md)。

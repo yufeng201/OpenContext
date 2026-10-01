@@ -37,6 +37,7 @@ export const AuditEventSchema = Type.Object(
         revisionId: ref,
         objectId: ref,
         tokenId: ref,
+        commitId: Type.Optional(ref),
       },
       { additionalProperties: false },
     ),
@@ -48,6 +49,9 @@ export const AuditEventSchema = Type.Object(
     code: Type.String({ pattern: '^[A-Z][A-Z0-9_]{1,63}$' }),
     requestId: ref,
     jobId: ref,
+    guarantee: Type.Optional(
+      Type.Union([Type.Literal('committed'), Type.Literal('best_effort')]),
+    ),
   },
   { additionalProperties: false },
 );
@@ -58,5 +62,15 @@ export function parseAuditEvent(input: unknown): AuditEvent {
     (input.code !== 'OK' && !isErrorCode(input.code))
   )
     throw new Error('INVALID_AUDIT_EVENT');
-  return input;
+  return { ...input, guarantee: input.guarantee ?? 'best_effort' };
+}
+
+export type AuditContext = Pick<AuditEvent, 'actor' | 'requestId'> & {
+  onRecorded?(id: string): void;
+};
+export function auditRef(value: unknown): string | null {
+  return typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+    ? value
+    : null;
 }

@@ -66,6 +66,7 @@ const dependencyCodes = [
   'INDEX_REBUILD_FAILED',
   'SCHEDULER_FAILED',
   'AUDIT_UNAVAILABLE',
+  'AUDIT_BACKLOG',
 ] as const;
 const DependencySchema = Type.Object(
   {
@@ -104,7 +105,23 @@ export const ReadinessReportSchema = Type.Object(
       pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
     }),
     scheduler: DependencySchema,
-    audit: Type.Optional(DependencySchema),
+    audit: Type.Optional(
+      Type.Object(
+        {
+          ...DependencySchema.properties,
+          pending: Type.Optional(
+            Type.Union([
+              Type.Integer({ minimum: 0, maximum: 10000 }),
+              Type.Null(),
+            ]),
+          ),
+          maxPending: Type.Optional(Type.Literal(10000)),
+          suspended: Type.Optional(Type.Boolean()),
+          readGap: Type.Optional(Type.Boolean()),
+        },
+        { additionalProperties: false },
+      ),
+    ),
   },
   { additionalProperties: false },
 );

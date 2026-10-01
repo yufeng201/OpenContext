@@ -1,3 +1,5 @@
+import { AuditDispatcher } from './audit-dispatcher.ts';
+import type { AuditContext } from '@opencontext/contracts/audit';
 import { auditEvent, auditAction } from './audit.ts';
 import type { AuditEvent } from '@opencontext/contracts/audit';
 import { parsePublicOrigin } from './deployment.ts';
@@ -89,9 +91,11 @@ export function createApplication(options: ApplicationOptions) {
     throw error;
   }
   const store = new FileStore(options.dataRoot);
+  const auditDispatcher = new AuditDispatcher(catalog);
   let auditFailure = false;
   const recordAudit = (event: AuditEvent) => {
     try {
+      auditDispatcher.flush();
       catalog.appendAudit(event);
     } catch {
       auditFailure = true;
@@ -150,6 +154,34 @@ export function createApplication(options: ApplicationOptions) {
   const requestTargets = new WeakMap<FastifyRequest, Record<string, unknown>>();
   const requestJobs = new WeakMap<FastifyRequest, string>();
   const auditedMcp = new WeakSet<FastifyRequest>();
+  const criticalRequests = new WeakSet<FastifyRequest>();
+  function critical<T>(
+    request: FastifyRequest,
+    operation: (context: AuditContext) => T,
+  ): T {
+    const principal = requestPrincipals.get(request);
+    if (!principal || principal.role !== 'owner') throw new Error('FORBIDDEN');
+    let recorded = false;
+    const value = operation({
+      actor: { id: principal.id, role: principal.role },
+      requestId: request.id,
+      onRecorded: () => {
+        recorded = true;
+      },
+    });
+    if (recorded) criticalRequests.add(request);
+    auditDispatcher.flush();
+    return value;
+  }
+  function auditStatus() {
+    const status = auditDispatcher.status();
+    return {
+      ...status,
+      ok: status.ok && !auditFailure,
+      code: auditFailure ? 'AUDIT_UNAVAILABLE' : status.code,
+      readGap: auditFailure,
+    };
+  }
   function credential(request: FastifyRequest): string {
     const header = request.headers.authorization;
     if (header) return header.startsWith('Bearer ') ? header.slice(7) : '';
@@ -375,10 +407,11 @@ export function createApplication(options: ApplicationOptions) {
   app.addHook('onResponse', (request, reply, done) => {
     const route = request.routeOptions.url ?? '';
     if (
-      (route.startsWith('/api/') &&
+      !criticalRequests.has(request) &&
+      ((route.startsWith('/api/') &&
         route !== '/api/health' &&
         route !== '/api/openapi.json') ||
-      (route === '/mcp' && !auditedMcp.has(request))
+        (route === '/mcp' && !auditedMcp.has(request)))
     ) {
       const code =
         requestCodes.get(request) ??
@@ -430,7 +463,11 @@ export function createApplication(options: ApplicationOptions) {
           ? 413
           : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
             ? 429
-            : code === 'CONNECTION_TEST_TIMEOUT'
+            : [
+                  'CONNECTION_TEST_TIMEOUT',
+                  'AUDIT_QUEUE_FULL',
+                  'AUDIT_UNAVAILABLE',
+                ].includes(code)
               ? 503
               : code === 'UNAUTHORIZED'
                 ? 401
@@ -483,9 +520,7 @@ export function createApplication(options: ApplicationOptions) {
   app.get('/api/readiness', (request, reply) => {
     authorize(authenticate(request), undefined, true);
     const result = inspectStorage(options.dataRoot, catalog.db);
-    if (auditFailure) {
-      result.ready = false;
-    }
+    if (!auditStatus().ok) result.ready = false;
     if (coordinator.lastIndexError) {
       result.checks.index = { ok: false, code: 'INDEX_REBUILD_FAILED' };
       result.ready = false;
@@ -494,10 +529,7 @@ export function createApplication(options: ApplicationOptions) {
     reply.code(result.ready ? 200 : 503);
     return parseReadinessReport({
       ...result,
-      audit: {
-        ok: !auditFailure,
-        code: auditFailure ? 'AUDIT_UNAVAILABLE' : 'OK',
-      },
+      audit: auditStatus(),
       requestId: request.id,
       scheduler: {
         ok: coordinator.lastWorkerError === null,
@@ -547,7 +579,9 @@ export function createApplication(options: ApplicationOptions) {
     { schema: { body: CreateProjectSchema } },
     (request) => {
       authorize(authenticate(request), undefined, true);
-      const project = catalog.createProject(request.body.name);
+      const project = critical(request, (context) =>
+        catalog.createProject(request.body.name, context),
+      );
       requestTargets.set(request, { projectId: project.id });
       return project;
     },
@@ -594,11 +628,17 @@ export function createApplication(options: ApplicationOptions) {
         'processor',
         context,
       );
-      const created = catalog.createBinding(request.params.id, {
-        name: selection.name,
-        connector,
-        processor,
-      });
+      const created = critical(request, (context) =>
+        catalog.createBinding(
+          request.params.id,
+          {
+            name: selection.name,
+            connector,
+            processor,
+          },
+          context,
+        ),
+      );
       requestTargets.set(request, { bindingId: created.id });
       return created;
     },
@@ -683,14 +723,17 @@ export function createApplication(options: ApplicationOptions) {
       if (!catalog.getBinding(binding.id)?.active)
         throw new Error('BINDING_REVOKED');
       const object = store.putText(request.body.content);
-      const imported = catalog.putImport(
-        binding.id,
-        {
-          id: randomUUID(),
-          filename: request.body.filename,
-          ...object,
-        },
-        request.body.expectedObjectId ?? null,
+      const imported = critical(request, (context) =>
+        catalog.putImport(
+          binding.id,
+          {
+            id: randomUUID(),
+            filename: request.body.filename,
+            ...object,
+          },
+          request.body.expectedObjectId ?? null,
+          context,
+        ),
       );
       requestTargets.set(request, { objectId: imported.id });
       return imported;
@@ -699,7 +742,10 @@ export function createApplication(options: ApplicationOptions) {
   app.delete<{ Params: BindingParams & { objectId: string } }>(
     '/api/projects/:id/bindings/:bindingId/imports/:objectId',
     (request) => {
-      catalog.removeImport(bindingGate(request).id, request.params.objectId);
+      const binding = bindingGate(request);
+      critical(request, (context) =>
+        catalog.removeImport(binding.id, request.params.objectId, context),
+      );
       return { ok: true };
     },
   );
@@ -711,7 +757,9 @@ export function createApplication(options: ApplicationOptions) {
       '/api/projects/:id/bindings/:bindingId/' + action,
       (request, reply) => {
         const binding = bindingGate(request);
-        const run = catalog.enqueue(binding.id, kind);
+        const run = critical(request, (context) =>
+          catalog.enqueue(binding.id, kind, context),
+        );
         requestJobs.set(request, run.id);
         reply.code(202);
         return run;
@@ -721,7 +769,10 @@ export function createApplication(options: ApplicationOptions) {
   app.delete<{ Params: BindingParams }>(
     '/api/projects/:id/bindings/:bindingId',
     (request) => {
-      catalog.revokeBinding(bindingGate(request).id);
+      const binding = bindingGate(request);
+      critical(request, (context) =>
+        catalog.revokeBinding(binding.id, context),
+      );
       return { ok: true };
     },
   );
@@ -758,7 +809,9 @@ export function createApplication(options: ApplicationOptions) {
   );
   app.post<{ Params: ProjectParams }>('/api/projects/:id/tokens', (request) => {
     authorize(authenticate(request), request.params.id, true);
-    const created = catalog.createReaderToken(request.params.id);
+    const created = critical(request, (context) =>
+      catalog.createReaderToken(request.params.id, context),
+    );
     requestTargets.set(request, { tokenId: created.id });
     return created;
   });
@@ -766,7 +819,9 @@ export function createApplication(options: ApplicationOptions) {
     '/api/tokens/:tokenId',
     (request) => {
       authorize(authenticate(request), undefined, true);
-      catalog.revokeToken(request.params.tokenId);
+      critical(request, (context) =>
+        catalog.revokeToken(request.params.tokenId, context),
+      );
       return { ok: true };
     },
   );
@@ -786,6 +841,7 @@ export function createApplication(options: ApplicationOptions) {
     },
     (request) => {
       authorize(authenticate(request), undefined, true);
+      auditDispatcher.flush();
       return catalog.auditEvents(
         Number(request.query.after ?? 0),
         Number(request.query.limit ?? 100),
@@ -793,6 +849,45 @@ export function createApplication(options: ApplicationOptions) {
           ? undefined
           : Number(request.query.until),
       );
+    },
+  );
+  app.get<{ Querystring: { limit?: string } }>(
+    '/api/audit/pending',
+    {
+      schema: {
+        querystring: Type.Object(
+          { limit: Type.Optional(Type.String({ pattern: '^[0-9]{1,3}$' })) },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    (request) => {
+      authorize(authenticate(request), undefined, true);
+      return {
+        events: catalog.pendingAuditEvents(Number(request.query.limit ?? 100)),
+        audit: auditStatus(),
+      };
+    },
+  );
+  app.post<{ Body: { acknowledgeReadGap?: boolean } }>(
+    '/api/audit/retry',
+    {
+      schema: {
+        body: Type.Object(
+          { acknowledgeReadGap: Type.Optional(Type.Boolean()) },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    (request, reply) => {
+      authorize(authenticate(request), undefined, true);
+      auditDispatcher.retry();
+      if (request.body.acknowledgeReadGap && auditDispatcher.status().ok)
+        auditFailure = false;
+      const status = auditStatus();
+      if (!status.ok) requestCodes.set(request, status.code);
+      reply.code(status.ok ? 200 : 503);
+      return { audit: status };
     },
   );
   registerMcp(app, services);
@@ -832,8 +927,12 @@ export function createApplication(options: ApplicationOptions) {
   });
   app.addHook('onClose', async () => {
     await coordinator.stop();
+    auditDispatcher.stop();
     catalog.close();
   });
-  if (options.autoStart !== false) coordinator.start();
-  return { app, catalog, store, coordinator, services };
+  if (options.autoStart !== false) {
+    auditDispatcher.start();
+    coordinator.start();
+  }
+  return { app, catalog, store, coordinator, services, auditDispatcher };
 }

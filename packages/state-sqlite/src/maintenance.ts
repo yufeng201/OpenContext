@@ -241,6 +241,11 @@ export function inspectStorage(
       .get()?.value;
     if (version !== undefined && version !== String(STORAGE_FORMAT))
       fail('SCHEMA_UNSUPPORTED');
+    const auditFormat = db
+      .prepare("SELECT value FROM catalog_meta WHERE key='audit_format'")
+      .get()?.value;
+    if (auditFormat !== undefined && auditFormat !== '2')
+      fail('SCHEMA_UNSUPPORTED');
     for (const [table, column] of [
       ['bindings', 'connector_json'],
       ['bindings', 'processor_json'],

@@ -1,12 +1,7 @@
+import { auditRef } from '@opencontext/contracts/audit';
 import { randomUUID } from 'node:crypto';
 import type { AuditEvent } from '@opencontext/contracts/audit';
 import type { Principal } from '@opencontext/contracts';
-export function auditRef(value: unknown): string | null {
-  return typeof value === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
-    ? value
-    : null;
-}
 export function auditEvent(
   action: string,
   principal: Principal | undefined,
@@ -35,10 +30,13 @@ export function auditEvent(
     code,
     requestId,
     jobId,
+    guarantee: 'best_effort',
   };
 }
 export function auditAction(route: string, method: string): string {
   if (route === '/mcp') return 'mcp.request';
+  if (route === '/api/audit/retry') return 'audit.retry';
+  if (route === '/api/audit/pending') return 'audit.pending.export';
   if (route === '/api/audit') return 'audit.export';
   if (route.endsWith('/test-connection')) return 'source.diagnose';
   if (route.endsWith('/sync') || route.endsWith('/process'))

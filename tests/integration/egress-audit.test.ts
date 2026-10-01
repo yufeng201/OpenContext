@@ -368,6 +368,10 @@ it('audit append failure degrades owner readiness without exposing database deta
   expect(response.json().audit).toEqual({
     ok: false,
     code: 'AUDIT_UNAVAILABLE',
+    pending: 0,
+    maxPending: 10000,
+    suspended: false,
+    readGap: true,
   });
   expect(response.body).not.toContain('no such table');
 });

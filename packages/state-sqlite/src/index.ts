@@ -1,4 +1,9 @@
-import { parseAuditEvent, type AuditEvent } from '@opencontext/contracts/audit';
+import {
+  parseAuditEvent,
+  auditRef,
+  type AuditEvent,
+  type AuditContext,
+} from '@opencontext/contracts/audit';
 import { safeErrorCode } from '@opencontext/contracts/errors';
 import {
   createHash,
@@ -183,6 +188,13 @@ export class Catalog {
         : undefined;
       if (savedVersion !== undefined && savedVersion !== '1')
         throw new Error('SCHEMA_UNSUPPORTED');
+      const auditFormat = tables.some((table) => table.name === 'catalog_meta')
+        ? this.db
+            .prepare("SELECT value FROM catalog_meta WHERE key='audit_format'")
+            .get()?.value
+        : undefined;
+      if (auditFormat !== undefined && auditFormat !== '2')
+        throw new Error('SCHEMA_UNSUPPORTED');
       const savedMode = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
             .prepare(
@@ -201,10 +213,15 @@ export class Catalog {
         key TEXT PRIMARY KEY, value TEXT NOT NULL
       ) STRICT;
       CREATE TABLE IF NOT EXISTS audit_events (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL,
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, delivered_at TEXT,
         event_json TEXT NOT NULL CHECK(json_valid(event_json))
       ) STRICT;
       CREATE INDEX IF NOT EXISTS audit_time ON audit_events(time);
+      CREATE UNIQUE INDEX IF NOT EXISTS audit_event_id ON audit_events(json_extract(event_json,'$.id'));
+      CREATE TABLE IF NOT EXISTS audit_pending (
+        id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+        event_json TEXT NOT NULL CHECK(json_valid(event_json) AND length(event_json)<=2048)
+      ) STRICT;
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
         head TEXT, created_at TEXT NOT NULL
@@ -274,6 +291,13 @@ export class Catalog {
       CREATE UNIQUE INDEX IF NOT EXISTS one_current_import_filename
         ON binding_imports(binding_id,filename) WHERE active=1;
     `);
+      if (
+        !this.db
+          .prepare('PRAGMA table_info(audit_events)')
+          .all()
+          .some((column) => column.name === 'delivered_at')
+      )
+        this.db.exec('ALTER TABLE audit_events ADD COLUMN delivered_at TEXT');
       this.transaction(() => {
         this.db
           .prepare(
@@ -314,6 +338,11 @@ export class Catalog {
         this.db
           .prepare(
             "INSERT INTO catalog_meta(key,value) VALUES('storage_version','1') ON CONFLICT(key) DO NOTHING",
+          )
+          .run();
+        this.db
+          .prepare(
+            "INSERT INTO catalog_meta(key,value) VALUES('audit_format','2') ON CONFLICT(key) DO NOTHING",
           )
           .run();
         this.rejectLegacyRuns();
@@ -388,18 +417,21 @@ export class Catalog {
     if (!row || row.value !== this.incarnation) throw new Error('LEASE_LOST');
   }
 
-  createProject(name: string): Project {
-    this.assertAuthority();
-    const project: Project = {
-      id: randomUUID(),
-      name,
-      head: null,
-      createdAt: new Date().toISOString(),
-    };
-    this.db
-      .prepare('INSERT INTO projects(id,name,created_at) VALUES(?,?,?)')
-      .run(project.id, name, project.createdAt);
-    return project;
+  createProject(name: string, audit?: AuditContext): Project {
+    return this.transaction(() => {
+      this.assertAuthority();
+      const project: Project = {
+        id: randomUUID(),
+        name,
+        head: null,
+        createdAt: new Date().toISOString(),
+      };
+      this.db
+        .prepare('INSERT INTO projects(id,name,created_at) VALUES(?,?,?)')
+        .run(project.id, name, project.createdAt);
+      this.criticalAudit('project.create', { projectId: project.id }, audit);
+      return project;
+    });
   }
 
   listProjects(): Project[] {
@@ -423,26 +455,33 @@ export class Catalog {
     };
   }
 
-  createBinding(projectId: string, input: PreparedBinding): Binding {
-    this.assertAuthority();
-    if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
-    const prepared = checkedBinding(input);
-    const id = randomUUID();
-    this.db
-      .prepare(
-        'INSERT INTO bindings(id,project_id,name,instance_ref,package_ref,config_json,connector_json,processor_json) VALUES(?,?,?,?,?,?,?,?)',
-      )
-      .run(
-        id,
-        projectId,
-        prepared.name,
-        prepared.connector.ref,
-        prepared.connector.packageRef,
-        JSON.stringify(prepared.connector.config),
-        JSON.stringify(prepared.connector),
-        JSON.stringify(prepared.processor),
-      );
-    return this.getBinding(id)!;
+  createBinding(
+    projectId: string,
+    input: PreparedBinding,
+    audit?: AuditContext,
+  ): Binding {
+    return this.transaction(() => {
+      this.assertAuthority();
+      if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
+      const prepared = checkedBinding(input);
+      const id = randomUUID();
+      this.db
+        .prepare(
+          'INSERT INTO bindings(id,project_id,name,instance_ref,package_ref,config_json,connector_json,processor_json) VALUES(?,?,?,?,?,?,?,?)',
+        )
+        .run(
+          id,
+          projectId,
+          prepared.name,
+          prepared.connector.ref,
+          prepared.connector.packageRef,
+          JSON.stringify(prepared.connector.config),
+          JSON.stringify(prepared.connector),
+          JSON.stringify(prepared.processor),
+        );
+      this.criticalAudit('source.create', { projectId, bindingId: id }, audit);
+      return this.getBinding(id)!;
+    });
   }
 
   /** Composition-root resolver is synchronous and must perform no network I/O. */
@@ -531,6 +570,7 @@ export class Catalog {
     bindingId: string,
     object: ImportedObjectRef,
     expectedObjectId: string | null = null,
+    audit?: AuditContext,
   ): ImportedObjectRef {
     return this.transaction(() => {
       this.assertAuthority();
@@ -600,6 +640,15 @@ export class Catalog {
           object.contentHash,
           object.bytes,
         );
+      this.criticalAudit(
+        'import.create',
+        {
+          projectId: this.getBinding(bindingId)!.projectId,
+          bindingId,
+          objectId: object.id,
+        },
+        audit,
+      );
       return {
         id: object.id,
         filename: object.filename,
@@ -624,7 +673,7 @@ export class Catalog {
       }));
   }
 
-  removeImport(bindingId: string, id: string): void {
+  removeImport(bindingId: string, id: string, audit?: AuditContext): void {
     this.transaction(() => {
       this.assertAuthority();
       this.activeBinding(bindingId);
@@ -634,41 +683,158 @@ export class Catalog {
         )
         .run(bindingId, id);
       if (removed.changes !== 1) throw new Error('NOT_FOUND');
+      this.criticalAudit(
+        'import.delete',
+        {
+          projectId: this.getBinding(bindingId)!.projectId,
+          bindingId,
+          objectId: id,
+        },
+        audit,
+      );
     });
   }
 
-  createReaderToken(projectId: string): { id: string; token: string } {
-    this.assertAuthority();
-    if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
-    const id = randomUUID();
-    const token = randomBytes(32).toString('base64url');
-    this.db
-      .prepare(
-        'INSERT INTO reader_tokens(id,token_hash,project_id) VALUES(?,?,?)',
-      )
-      .run(id, digest(token), projectId);
-    return { id, token };
+  createReaderToken(
+    projectId: string,
+    audit?: AuditContext,
+  ): { id: string; token: string } {
+    return this.transaction(() => {
+      this.assertAuthority();
+      if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
+      const id = randomUUID();
+      const token = randomBytes(32).toString('base64url');
+      this.db
+        .prepare(
+          'INSERT INTO reader_tokens(id,token_hash,project_id) VALUES(?,?,?)',
+        )
+        .run(id, digest(token), projectId);
+      this.criticalAudit('token.create', { projectId, tokenId: id }, audit);
+      return { id, token };
+    });
   }
 
-  appendAudit(event: AuditEvent): void {
-    this.assertAuthority();
-    parseAuditEvent(event);
-    this.db.exec('BEGIN IMMEDIATE');
+  private criticalAudit(
+    action: string,
+    input: Record<string, unknown>,
+    context?: AuditContext,
+    jobId: string | null = null,
+  ): void {
     try {
+      if (this.auditPending().pending >= 10000)
+        throw new Error('AUDIT_QUEUE_FULL');
+      const event = parseAuditEvent({
+        id: randomUUID(),
+        time: new Date().toISOString(),
+        actor: context?.actor ?? { id: 'system', role: 'system' },
+        action,
+        target: {
+          projectId: auditRef(input['projectId']),
+          bindingId: auditRef(input['bindingId']),
+          fileId: null,
+          revisionId: null,
+          objectId: auditRef(input['objectId']),
+          tokenId: auditRef(input['tokenId']),
+          commitId: auditRef(input['commitId']),
+        },
+        result: 'success',
+        code: 'OK',
+        requestId:
+          context?.requestId ?? (jobId ? this.auditRequestForJob(jobId) : null),
+        jobId,
+        guarantee: 'committed',
+      });
       this.db
-        .prepare('INSERT INTO audit_events(time,event_json) VALUES(?,?)')
-        .run(event.time, JSON.stringify(event));
-      this.db
-        .prepare('DELETE FROM audit_events WHERE time < ?')
-        .run(new Date(Date.now() - 30 * 86400000).toISOString());
-      this.db.exec(
-        'DELETE FROM audit_events WHERE sequence <= COALESCE((SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1 OFFSET 10000), -1)',
-      );
-      this.db.exec('COMMIT');
+        .prepare(
+          'INSERT INTO audit_pending(id,created_at,event_json) VALUES(?,?,?)',
+        )
+        .run(event.id, event.time, JSON.stringify(event));
+      context?.onRecorded?.(event.id);
     } catch (error) {
-      this.db.exec('ROLLBACK');
-      throw error;
+      if (error instanceof Error && error.message === 'AUDIT_QUEUE_FULL')
+        throw error;
+      throw new Error('AUDIT_UNAVAILABLE', { cause: error });
     }
+  }
+  pendingAuditEvents(limit = 100): AuditEvent[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new Error('INVALID_AUDIT_EVENT');
+    return this.db
+      .prepare(
+        'SELECT event_json FROM audit_pending ORDER BY created_at,id LIMIT ?',
+      )
+      .all(limit)
+      .map((row) => parseAuditEvent(JSON.parse(str(row, 'event_json'))));
+  }
+  auditPending() {
+    const row = this.db
+      .prepare(
+        'SELECT count(*) AS n,min(created_at) AS oldest FROM audit_pending',
+      )
+      .get()!;
+    return {
+      pending: Number(row['n']),
+      maxPending: 10000,
+      oldest: row['oldest'] as string | null,
+    };
+  }
+  private insertAudit(event: AuditEvent): void {
+    const json = JSON.stringify(parseAuditEvent(event));
+    const existing = this.db
+      .prepare(
+        "SELECT event_json FROM audit_events WHERE json_extract(event_json,'$.id')=?",
+      )
+      .get(event.id);
+    if (existing) {
+      if (
+        JSON.stringify(
+          parseAuditEvent(JSON.parse(str(existing, 'event_json'))),
+        ) !== json
+      )
+        throw new Error('AUDIT_CONFLICT');
+      return;
+    }
+    this.db
+      .prepare(
+        'INSERT INTO audit_events(time,delivered_at,event_json) VALUES(?,?,?)',
+      )
+      .run(event.time, new Date().toISOString(), json);
+  }
+  private pruneAudit(): void {
+    this.db
+      .prepare('DELETE FROM audit_events WHERE COALESCE(delivered_at,time) < ?')
+      .run(new Date(Date.now() - 30 * 86400000).toISOString());
+    this.db.exec(
+      'DELETE FROM audit_events WHERE sequence <= COALESCE((SELECT sequence FROM audit_events ORDER BY sequence DESC LIMIT 1 OFFSET 10000), -1)',
+    );
+  }
+  appendAudit(event: AuditEvent): void {
+    this.transaction(() => {
+      this.assertAuthority();
+      this.insertAudit(event);
+      this.pruneAudit();
+    });
+  }
+  deliverAuditBatch(limit = 100): number {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new Error('INVALID_AUDIT_EVENT');
+    return this.transaction(() => {
+      this.assertAuthority();
+      const pending = this.db
+        .prepare(
+          'SELECT id,event_json FROM audit_pending ORDER BY created_at,id LIMIT ?',
+        )
+        .all(limit);
+      for (const row of pending) {
+        const event = parseAuditEvent(JSON.parse(str(row, 'event_json')));
+        if (event.id !== row['id'] || event.guarantee !== 'committed')
+          throw new Error('AUDIT_CONFLICT');
+        this.insertAudit(event);
+        this.db.prepare('DELETE FROM audit_pending WHERE id=?').run(event.id);
+      }
+      this.pruneAudit();
+      return pending.length;
+    });
   }
   auditEvents(after = 0, limit = 100, until?: number) {
     if (
@@ -691,7 +857,7 @@ export class Catalog {
       );
     const events = this.db
       .prepare(
-        'SELECT sequence,event_json FROM audit_events WHERE sequence > ? AND sequence <= ? AND time >= ? ORDER BY sequence LIMIT ?',
+        'SELECT sequence,event_json FROM audit_events WHERE sequence > ? AND sequence <= ? AND COALESCE(delivered_at,time) >= ? ORDER BY sequence LIMIT ?',
       )
       .all(
         after,
@@ -705,7 +871,7 @@ export class Catalog {
       }));
     const oldest = this.db
       .prepare(
-        'SELECT MIN(sequence) AS sequence FROM audit_events WHERE time >= ?',
+        'SELECT MIN(sequence) AS sequence FROM audit_events WHERE COALESCE(delivered_at,time) >= ?',
       )
       .get(new Date(Date.now() - 30 * 86400000).toISOString());
     return {
@@ -720,15 +886,28 @@ export class Catalog {
   auditRequestForJob(jobId: string): string | null {
     const row = this.db
       .prepare(
-        "SELECT json_extract(event_json,'$.requestId') AS request_id FROM audit_events WHERE json_extract(event_json,'$.jobId')=? AND json_extract(event_json,'$.action')='task.enqueue' ORDER BY sequence DESC LIMIT 1",
+        "SELECT json_extract(event_json,'$.requestId') AS request_id FROM (SELECT event_json FROM audit_pending UNION ALL SELECT event_json FROM audit_events) WHERE json_extract(event_json,'$.jobId')=? AND json_extract(event_json,'$.action')='task.enqueue' LIMIT 1",
       )
       .get(jobId);
     return row ? nullable(row, 'request_id') : null;
   }
 
-  revokeToken(id: string): void {
-    this.assertAuthority();
-    this.db.prepare('UPDATE reader_tokens SET revoked=1 WHERE id=?').run(id);
+  revokeToken(id: string, audit?: AuditContext): void {
+    this.transaction(() => {
+      this.assertAuthority();
+      const row = this.db
+        .prepare('SELECT project_id,revoked FROM reader_tokens WHERE id=?')
+        .get(id);
+      const changed = this.db
+        .prepare('UPDATE reader_tokens SET revoked=1 WHERE id=? AND revoked=0')
+        .run(id);
+      if (changed.changes)
+        this.criticalAudit(
+          'token.revoke',
+          { tokenId: id, projectId: row?.['project_id'] },
+          audit,
+        );
+    });
   }
 
   authenticate(token: string, ownerToken: string): Principal | null {
@@ -757,7 +936,7 @@ export class Catalog {
       : null;
   }
 
-  enqueue(bindingId: string, kind: Run['kind']): Run {
+  enqueue(bindingId: string, kind: Run['kind'], audit?: AuditContext): Run {
     return this.transaction(() => {
       this.assertAuthority();
       const binding = this.activeBinding(bindingId);
@@ -797,6 +976,12 @@ export class Catalog {
           new Date().toISOString(),
           JSON.stringify(execution),
         );
+      this.criticalAudit(
+        'task.enqueue',
+        { projectId: binding.projectId, bindingId },
+        audit,
+        id,
+      );
       return this.getRun(id)!;
     });
   }
@@ -1097,6 +1282,16 @@ export class Catalog {
       this.db
         .prepare('INSERT INTO outbox(project_id,commit_id) VALUES(?,?)')
         .run(input.projectId, input.commitId);
+      this.criticalAudit(
+        'content.publish',
+        {
+          projectId: input.projectId,
+          bindingId: input.run.bindingId,
+          commitId: input.commitId,
+        },
+        undefined,
+        input.run.id,
+      );
     });
   }
 
@@ -1150,11 +1345,12 @@ export class Catalog {
     this.db.prepare('UPDATE outbox SET acknowledged=1 WHERE id=?').run(id);
   }
 
-  revokeBinding(id: string): void {
+  revokeBinding(id: string, audit?: AuditContext): void {
     this.transaction(() => {
       this.assertAuthority();
       const binding = this.getBinding(id);
       if (!binding) throw new Error('NOT_FOUND');
+      if (!binding.active) return;
       this.db.prepare('UPDATE bindings SET active=0 WHERE id=?').run(id);
       this.db
         .prepare(
@@ -1195,6 +1391,11 @@ export class Catalog {
             file.fileId,
           );
       }
+      this.criticalAudit(
+        'source.revoke',
+        { projectId: binding.projectId, bindingId: id },
+        audit,
+      );
     });
   }
 }
