@@ -145,9 +145,12 @@ export function importEvidence(value: unknown): Evidence {
   return structuredClone(value);
 }
 
-/** Only explicitly named regular files; bounded read before JSON parsing, no symlinks. */
+/** Nonblocking open, then validate/read the same fd; no pathname stat/open race. */
 export function readEvidenceFile(path: string): unknown {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
   try {
     const stat = fstatSync(fd);
     requireCondition(stat.isFile() && stat.size <= 262144, 'INPUT_LIMIT');

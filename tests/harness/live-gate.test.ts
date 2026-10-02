@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  writeFileSync,
+  symlinkSync,
+  rmSync,
+  renameSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -278,6 +284,64 @@ test('explicit file import rejects oversize and symlinks; CLI errors redact raw 
     assert.equal(run.stdout, '');
     assert(!run.stderr.includes('private-synthetic-canary'));
     assert.equal(JSON.parse(run.stderr).liveProof, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('no-writer FIFO, device, directory and regular-to-FIFO replacement reject within a hard child deadline', () => {
+  const root = mkdtempSync(join(tmpdir(), 'oc-live-special-'));
+  try {
+    const regular = join(root, 'regular.json');
+    const fifo = join(root, 'synthetic-private-fifo');
+    writeFileSync(regular, '{"synthetic":true}');
+    assert.deepEqual(readEvidenceFile(regular), { synthetic: true });
+    const made = spawnSync('mkfifo', [fifo], {
+      encoding: 'utf8',
+      timeout: 2000,
+    });
+    assert.equal(made.error, undefined);
+    assert.equal(made.status, 0);
+    const rejectWithinDeadline = (path: string, first: boolean) => {
+      const started = performance.now();
+      const run = spawnSync(
+        process.execPath,
+        [
+          'scripts/live-gate.ts',
+          'verify',
+          ...(first ? [path, regular] : [regular, path]),
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 2000,
+          killSignal: 'SIGKILL',
+        },
+      );
+      assert.equal(
+        run.error,
+        undefined,
+        'special input must reject, not require timeout termination',
+      );
+      assert.equal(run.signal, null);
+      assert.equal(run.status, 1);
+      assert(performance.now() - started < 2000);
+      assert.equal(run.stdout, '');
+      assert.deepEqual(JSON.parse(run.stderr), {
+        status: 'REJECTED',
+        code: 'INVALID_OR_UNSUPPORTED_OFFLINE_EVIDENCE',
+        liveProof: false,
+      });
+      assert(!run.stderr.includes(path));
+    };
+    for (const path of [fifo, root, '/dev/null']) {
+      rejectWithinDeadline(path, true);
+      // A valid request schema is not required: both files are read before validation.
+      rejectWithinDeadline(path, false);
+    }
+    // Replace a previously accepted regular pathname. The open fd, rather than a
+    // stale pre-open pathname stat, must determine whether the input is regular.
+    renameSync(fifo, regular);
+    rejectWithinDeadline(regular, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
