@@ -16,6 +16,10 @@ import {
   inspectStorage,
   noLinks,
 } from '../packages/state-sqlite/src/maintenance.ts';
+import {
+  CURRENT_STORAGE_VERSION,
+  APPLICATION_COMPATIBILITY,
+} from '../packages/contracts/src/maintenance.ts';
 import { safeErrorCode } from '../packages/contracts/src/errors.ts';
 import { parsePublicOrigin, parsePort } from '../apps/server/src/deployment.ts';
 import { readStaticAsset } from '../apps/server/src/static.ts';
@@ -68,6 +72,8 @@ export function preflight(env: Record<string, string | undefined>): object {
   }
   const base = {
     node: process.version,
+    applicationCompatibility: APPLICATION_COMPATIBILITY,
+    writeStorageVersion: CURRENT_STORAGE_VERSION,
     pnpm,
     privateMode: true,
     loopbackOnly: true,
@@ -87,12 +93,16 @@ export function preflight(env: Record<string, string | undefined>): object {
   try {
     db = new DatabaseSync(join(dataRoot, 'control.sqlite'), { readOnly: true });
     const inspection = inspectStorage(dataRoot, db);
-    const ready = inspection.ready && inspection.mode === 'private';
+    const upgradeRequired =
+      inspection.checks.migration.code === 'LEGACY_COMPATIBLE';
+    const ready =
+      inspection.ready && inspection.mode === 'private' && !upgradeRequired;
     return {
       ...base,
       ready,
       data: 'existing',
       inspection,
+      upgradeRequired,
       authorizationReviewRequired: true,
     };
   } finally {

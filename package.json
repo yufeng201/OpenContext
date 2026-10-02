@@ -29,6 +29,8 @@
     "docs:preview": "node scripts/preview-docs.ts",
     "admin": "node scripts/admin.ts",
     "drill:restore": "node scripts/restore-drill.ts",
+    "drill:upgrade": "node scripts/upgrade-drill.ts",
+    "drill:load": "node scripts/load-drill.ts",
     "preflight": "node scripts/preflight.ts",
     "drill:deploy": "node scripts/deployment-drill.ts"
   },

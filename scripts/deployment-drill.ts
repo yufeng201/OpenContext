@@ -20,9 +20,9 @@ import type { createApplication } from '../apps/server/src/app.ts';
 const startedAt = Date.now();
 const root = mkdtempSync(join(tmpdir(), 'oc-clean-deploy-')),
   checkout = join(root, 'checkout'),
-  data = join(root, 'data'),
   repo = join(root, 'synthetic-repo'),
   userConfig = join(root, 'empty-npmrc');
+let data = join(root, 'data');
 const owner = 'synthetic-deployment-owner-000000000000000';
 mkdirSync(checkout, { mode: 0o700 });
 writeFileSync(userConfig, '', { mode: 0o600 });
@@ -244,14 +244,33 @@ try {
   legacy.prepare("DELETE FROM catalog_meta WHERE key='storage_version'").run();
   legacy.close();
   const compatible = report(
-    successful('pnpm', ['preflight'], checkout, production).out,
+    run('pnpm', ['preflight'], checkout, production).out,
   );
-  assert.equal(compatible.ready, true);
+  assert.equal(compatible.ready, false);
+  assert.equal(compatible.upgradeRequired, true);
   assert.equal(
     (compatible.inspection as { checks: { migration: { code: string } } })
       .checks.migration.code,
     'LEGACY_COMPATIBLE',
   );
+  const oldHash = sha(join(data, 'control.sqlite'));
+  const snapshot = join(root, 'pre-upgrade-snapshot');
+  const nextData = join(root, 'upgraded-data');
+  successful(
+    process.execPath,
+    ['scripts/admin.ts', 'backup', data, snapshot],
+    checkout,
+    env,
+  );
+  successful(
+    process.execPath,
+    ['scripts/admin.ts', 'upgrade', snapshot, nextData],
+    checkout,
+    env,
+  );
+  assert.equal(sha(join(data, 'control.sqlite')), oldHash);
+  data = nextData;
+  production.OPENCONTEXT_DATA_ROOT = data;
   const upgraded = await launch();
   const headers = { authorization: 'Bearer ' + owner };
   const projects = (await (

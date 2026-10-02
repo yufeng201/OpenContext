@@ -1,3 +1,7 @@
+import {
+  CURRENT_STORAGE_VERSION,
+  APPLICATION_COMPATIBILITY,
+} from '@opencontext/contracts/maintenance';
 import { AuditDispatcher } from './audit-dispatcher.ts';
 import type { AuditContext } from '@opencontext/contracts/audit';
 import { auditEvent, auditAction } from './audit.ts';
@@ -534,7 +538,11 @@ export function createApplication(options: ApplicationOptions) {
     });
   });
   app.get('/api/openapi.json', () => QueryOpenApi);
-  app.get('/api/health', () => ({ status: 'ok', schemaVersion: 1 }));
+  app.get('/api/health', () => ({
+    status: 'ok',
+    schemaVersion: CURRENT_STORAGE_VERSION,
+    applicationCompatibility: APPLICATION_COMPATIBILITY,
+  }));
   app.get('/api/readiness', (request, reply) => {
     authorize(authenticate(request), undefined, true);
     const result = inspectStorage(options.dataRoot, catalog.db);

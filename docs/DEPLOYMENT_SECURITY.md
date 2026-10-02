@@ -35,7 +35,7 @@ owner环境变量由操作员事先私下设置，此例不创建/打印凭据�
 
 同一控制库只能有一个Catalog写者；同机SQLite authority锁不是多节点/NFS锁。持久卷必须包含control.sqlite、content历史blob/revision/commit和plugin-state，不能只留最新正文。迁移前正常停服，按[备份恢复](BACKUP_RECOVERY.md)建立可信完整快照，再对停写目录执行preflight。
 
-目前支持当前storage_version=1及具有当前完整表字段的无版本兼容库；演练模拟该已知旧标记形状，未验收所有历史发行版本。未知版本、缺对象/checkpoint、损坏或不安全路径均拒绝。预检不会静默修库、跳过校验或删除数据。若索引未就绪，先看稳定依赖code、正常启动重建outbox并等待owner readiness，不要手改内容/授权表。
+当前写者仅接受storage_version=2；停写工具可校验已知schema1/无版本完整形状，但preflight报告upgradeRequired，新程序启动拒绝。演练通过停写备份→新目录显式upgrade后再启动，未验收所有历史发行版本。未知版本、缺对象/checkpoint、损坏或不安全路径均拒绝。预检不会静默修库、跳过校验或删除数据。若索引未就绪，先看稳定依赖code、正常启动重建outbox并等待owner readiness，不要手改内容/授权表。
 
 更新程序、冻结安装和构建须在独立源码目录进行；保留数据卷与owner秘密。恢复仅创建新目录，默认撤销全部旧reader token。快照无法知道之后的来源撤权/法规删除；owner须对照当前授权和删除记录，再显式发放新项目token。已复制字节无法远程收回。完整跨版本迁移、回滚、加密备份、备份保留擦除、HA和物理断电演练仍缺失。
 
@@ -81,3 +81,5 @@ pnpm audit --json
 受控个人实例可先保留现有owner/reader模式；团队实例须完成上述决策、身份/撤销/审计矩阵后才开放。不能简单把所有SSO用户换成owner，也不为企业标签重写文件/插件架构。真实飞书群权限/撤权与认证模型采用仍停在用户明确授权后的live gate；本批不创建凭据或修改真实Agent配置。详见[产品就绪矩阵](PRODUCT_READINESS.md)。
 
 连接器当前新增DNS全部答案校验、实际连接pin与0重定向策略；保留OS隔离门槛。控制库新增有界审计，owner导出与readiness故障降级，非防篡改。具体实测边界见[出站与审计](EGRESS_AUDIT.md)，团队single-tenant提案见[团队身份决策](TEAM_IDENTITY_DECISION.md)。
+
+新schema2写入版本门禁与旧release隔离回滚、预算和可追踪生产门槛见[可执行runbook](PRODUCTION_RUNBOOK.md)。

@@ -52,14 +52,16 @@ MCP 的官方协议客户端和真实 Codex 客户端显式 RPC 传输已验证�
 - [开发指南](docs/DEVELOPMENT.md)：工程约束、测试与本地工具；`pnpm check` 是统一检查入口。
 - [设计文档](docs/README.md)：产品目标、架构、蓝图与未来用户旅程；规划内容不代表已实现。
 
-完整恢复需要内容文件、控制数据库和飞书已确认游标引用的 plugin-state 一起备份；只复制导出正文不能恢复授权、当前版本和任务。当前还没有生产备份/恢复工具。凭据、运行数据、缓存和临时验收材料不要提交到 Git。
+完整恢复需要内容文件、控制数据库和飞书已确认游标引用的 plugin-state 一起备份；只复制导出正文不能恢复授权、当前版本和任务。已有停写快照/新目录恢复工具，但生产RPO/RTO、加密与保留策略未验收。凭据、运行数据、缓存和临时验收材料不要提交到 Git。
 
 企业与接入成熟度、缺口及下一阶段验收见 [产品就绪矩阵](docs/PRODUCT_READINESS.md)。当前仅为受控开发预览。
 
 ## 本地查询接入与文档站（源码预览）
 
-查询路径与TypeBox请求契约共用；`/api/openapi.json`是查询子集，源码TS SDK和只读CLI不存token。详见[查询接入](docs/QUERY_ACCESS.md)。`pnpm docs:build`生成8页静态文档、OpenAPI和llms.txt；`pnpm docs:preview`仅在本机4400预览。没有发布npm/PyPI或公开部署网站。生产备份/恢复、完整响应schema及真实Agent E2E仍是缺口。
+查询路径与TypeBox请求契约共用；`/api/openapi.json`是查询子集，源码TS SDK和只读CLI不存token。详见[查询接入](docs/QUERY_ACCESS.md)。`pnpm docs:build`生成14页静态文档、OpenAPI和llms.txt；`pnpm docs:preview`仅在本机4400预览。没有发布npm/PyPI或公开部署网站。生产备份/恢复、完整响应schema及真实Agent E2E仍是缺口。
 
 停写备份与恢复：`pnpm admin --help`、`pnpm drill:restore`，见[运维操作](docs/BACKUP_RECOVERY.md)。恢复只使用新目录，默认撤销旧reader token；不覆盖用户数据。
 
 私有部署审查：`pnpm preflight`、`pnpm drill:deploy`，见[部署安全与限制](docs/DEPLOYMENT_SECURITY.md)。不自动配置TLS/防火墙/自启，仍需完成公网P0门槛。
+
+停机升级与隔离回滚、明确版本门禁和有界负载计划见[单机操作指南](docs/PRODUCTION_RUNBOOK.md)；仍不宣称企业或工业级就绪。

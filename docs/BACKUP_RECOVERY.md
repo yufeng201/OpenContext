@@ -1,6 +1,6 @@
 # 停写备份、恢复与依赖诊断
 
-版本：opencontext-backup/v1，storage_version=1，Node24单机开发预览。前置条件：本机文件系统操作员、完整停止该目录的服务和外部写入者、足够磁盘空间。数据流向：本机控制数据库、内容/版本/commit、plugin-state进入新建私有快照目录，再恢复到新的数据目录；不访问网络、真实账号或用户Agent配置。成功判据：manifest与文件hash通过，恢复实例的head、固定版本正文/hash/citation和搜索一致，旧reader token被拒绝，新token仍受项目/来源权限约束。
+版本：opencontext-backup/v1，storage_version=1/2（当前写者仅2），Node24单机开发预览。前置条件：本机文件系统操作员、完整停止该目录的服务和外部写入者、足够磁盘空间。数据流向：本机控制数据库、内容/版本/commit、plugin-state进入新建私有快照目录，再恢复到新的数据目录；不访问网络、真实账号或用户Agent配置。成功判据：manifest与文件hash通过，恢复实例的head、固定版本正文/hash/citation和搜索一致，旧reader token被拒绝，新token仍受项目/来源权限约束。
 
 ## 边界与一致性
 
@@ -33,7 +33,7 @@ pnpm admin diagnose NEW_DATA_ROOT
 
 恢复保留fileId、revision、head、历史出处、binding范围和快照时的active/revoked状态；但快照无法知道备份之后的撤权，因此**默认吊销全部reader token**。用owner启动新实例，确认上游/本地来源授权后显式发放新项目token；此前撤销的来源不得自动重新启用。无法从旧快照推断之后的来源撤权或法规删除，必须人工对照最新授权/删除记录；仅有owner可读的隔离恢复不能被宣传为权限全局同步。
 
-存储版本未知会在Catalog迁移/写入前拒绝；缺字段的旧版本只按已有兼容迁移处理。完整跨发行升级/回滚、密钥轮换、加密备份、保留/擦除和物理断电演练仍未交付。
+存储版本未知会在Catalog迁移/写入前拒绝；schema1不能直接由新写者启动；仅已审阅基线快照可显式新目录升级，缺字段旧版本须先走其受审基线。完整跨发行升级/回滚、密钥轮换、加密备份、保留/擦除和物理断电演练仍未交付。
 
 ## liveness 与 readiness
 
@@ -49,3 +49,5 @@ pnpm drill:restore
 readiness CLI需owner token在私有环境中；503输出经过共享TypeBox契约校验的依赖报告并以非零退出表示，任意错误正文不会回显。drill:restore不接受任何用户目录/凭据，自动创建和清理合成临时实例，通过真实admin backup/verify/restore/diagnose、HTTP查询CLI、固定引用和撤权演练；不调用模型或真实飞书。
 
 探针是有界同步完整性审计，可能耗时，不应高频轮询；不是低成本负载均衡probe、OS磁盘配额、HA/SLO或完整审计平台。索引不就绪先查看诊断并按正常启动恢复outbox；未知schema、缺内容或损坏不要“修复”为忽略断言。详细缺口见[产品就绪矩阵](PRODUCT_READINESS.md)。
+
+当前schema1实例需从受审快照通过admin upgrade恢复到新schema2目录，不能直接用新程序写旧库。完整安装/升级/旧release隔离回滚步骤见[操作指南](PRODUCTION_RUNBOOK.md)。

@@ -1,9 +1,11 @@
 import {
   parseBackupManifest,
+  CURRENT_STORAGE_VERSION,
   type BackupManifest,
 } from '@opencontext/contracts/maintenance';
 import { DatabaseSync, backup } from 'node:sqlite';
 import { validateAuditStorage } from './audit-storage.ts';
+import { parseAuditEvent } from '@opencontext/contracts/audit';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   constants,
@@ -33,7 +35,7 @@ import {
 } from 'node:path';
 import type { FileEntry } from '@opencontext/contracts';
 
-export const STORAGE_FORMAT = 1;
+export const STORAGE_FORMAT = CURRENT_STORAGE_VERSION;
 export const RESTORE_MARKER = '.restore-incomplete';
 export const LIMITS = {
   files: 20_000,
@@ -240,7 +242,10 @@ export function inspectStorage(
     const version = db
       .prepare("SELECT value FROM catalog_meta WHERE key='storage_version'")
       .get()?.value;
-    if (version !== undefined && version !== String(STORAGE_FORMAT))
+    if (
+      version !== undefined &&
+      !['1', String(STORAGE_FORMAT)].includes(String(version))
+    )
       fail('SCHEMA_UNSUPPORTED');
     const auditFormat = db
       .prepare("SELECT value FROM catalog_meta WHERE key='audit_format'")
@@ -268,7 +273,8 @@ export function inspectStorage(
     result.mode = mode;
     result.checks.migration = {
       ok: true,
-      code: version === undefined ? 'LEGACY_COMPATIBLE' : 'OK',
+      code:
+        version === undefined || version === '1' ? 'LEGACY_COMPATIBLE' : 'OK',
     };
   } catch {
     return result;
@@ -603,7 +609,11 @@ export async function createBackup(
       version: 1,
       complete: true,
       id: randomUUID(),
-      storageVersion: STORAGE_FORMAT,
+      storageVersion: Number(
+        db
+          .prepare("SELECT value FROM catalog_meta WHERE key='storage_version'")
+          .get()?.value ?? 1,
+      ) as 1 | 2,
       mode: before.mode!,
       createdAt: new Date().toISOString(),
       heads: db
@@ -650,7 +660,7 @@ export function verifyBackup(snapshot: string): Manifest {
   if (
     m.format !== 'opencontext-backup' ||
     m.version !== 1 ||
-    m.storageVersion !== STORAGE_FORMAT ||
+    ![1, STORAGE_FORMAT].includes(m.storageVersion) ||
     m.complete !== true ||
     !['demo', 'private'].includes(m.mode) ||
     typeof m.id !== 'string' ||
@@ -704,6 +714,14 @@ export function verifyBackup(snapshot: string): Manifest {
     const inspection = inspectStorage(root, db, true);
     if (!inspection.ready || inspection.mode !== m.mode)
       fail('SNAPSHOT_NOT_READY');
+    if (
+      Number(
+        db
+          .prepare("SELECT value FROM catalog_meta WHERE key='storage_version'")
+          .get()?.value ?? 1,
+      ) !== m.storageVersion
+    )
+      fail('SCHEMA_UNSUPPORTED');
     const heads = db.prepare('SELECT id,head FROM projects ORDER BY id').all();
     if (JSON.stringify(heads) !== JSON.stringify(m.heads))
       fail('HEAD_MISMATCH');
@@ -720,6 +738,7 @@ export function restoreBackup(
   snapshot: string,
   destination: string,
   onProgress?: (copied: number) => void,
+  beforeRelease?: (root: string) => void,
 ): { id: string; files: number; mode: string } {
   const root = realpathNoLinks(snapshot);
   noLinks(dirname(resolve(destination)));
@@ -760,6 +779,7 @@ export function restoreBackup(
   } finally {
     privateDb.close();
   }
+  beforeRelease?.(dest);
   const controlFd = openSync(join(dest, 'control.sqlite'), 'r');
   try {
     fsyncSync(controlFd);
@@ -778,4 +798,75 @@ export function restoreBackup(
   sync(dest);
   sync(dirname(dest));
   return { id: manifest.id, files: manifest.files.length, mode: manifest.mode };
+}
+
+/** Upgrade only a verified immutable snapshot into a new quarantined directory. */
+export function upgradeBackup(
+  snapshot: string,
+  destination: string,
+  onMigration?: (phase: 'before-commit' | 'after-commit') => void,
+) {
+  const manifest = verifyBackup(snapshot);
+  if (manifest.storageVersion === STORAGE_FORMAT) fail('NO_UPGRADE_REQUIRED');
+  const restored = restoreBackup(snapshot, destination, undefined, (root) => {
+    const db = new DatabaseSync(join(root, 'control.sqlite'));
+    try {
+      if (
+        db
+          .prepare("SELECT value FROM catalog_meta WHERE key='audit_format'")
+          .get()?.value !== '2'
+      )
+        fail('UPGRADE_BASELINE_REQUIRED');
+      validateAuditStorage(db);
+      db.exec('PRAGMA synchronous=FULL; BEGIN IMMEDIATE');
+      try {
+        if (
+          Number(
+            db.prepare('SELECT count(*) AS n FROM audit_pending').get()?.n,
+          ) >= 10000
+        )
+          fail('AUDIT_QUEUE_FULL');
+        const event = parseAuditEvent({
+          id: randomUUID(),
+          time: new Date().toISOString(),
+          actor: { id: 'system', role: 'system' },
+          action: 'storage.upgrade',
+          target: {
+            projectId: null,
+            bindingId: null,
+            fileId: null,
+            revisionId: null,
+            objectId: null,
+            tokenId: null,
+            commitId: null,
+          },
+          result: 'success',
+          code: 'OK',
+          requestId: null,
+          jobId: null,
+          guarantee: 'committed',
+        });
+        db.prepare(
+          "INSERT INTO catalog_meta(key,value) VALUES('storage_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        ).run(String(STORAGE_FORMAT));
+        db.prepare(
+          'INSERT INTO audit_pending(id,created_at,event_json) VALUES(?,?,?)',
+        ).run(event.id, event.time, JSON.stringify(event));
+        onMigration?.('before-commit');
+        db.exec('COMMIT');
+      } catch (error) {
+        if (db.isTransaction) db.exec('ROLLBACK');
+        throw error;
+      }
+      onMigration?.('after-commit');
+      if (!inspectStorage(root, db, true).ready) fail('RESTORE_NOT_READY');
+    } finally {
+      db.close();
+    }
+  });
+  return {
+    ...restored,
+    fromStorageVersion: manifest.storageVersion,
+    storageVersion: STORAGE_FORMAT,
+  };
 }

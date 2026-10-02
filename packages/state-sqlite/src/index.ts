@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { validateAuditStorage } from './audit-storage.ts';
+import { CURRENT_STORAGE_VERSION } from '@opencontext/contracts/maintenance';
 import type {
   Binding,
   ExecutionLock,
@@ -152,6 +153,11 @@ export class Catalog {
   private databaseClosed = false;
 
   constructor(dbPath: string, options: CatalogOptions = { mode: 'private' }) {
+    if (
+      dbPath !== ':memory:' &&
+      existsSync(join(dirname(dbPath), '.restore-incomplete'))
+    )
+      throw new Error('RESTORE_INCOMPLETE');
     if (options.mode !== 'demo' && options.mode !== 'private')
       throw new Error('INVALID_DATA_MODE');
     const path = dbPath === ':memory:' ? dbPath : canonicalDatabasePath(dbPath);
@@ -187,7 +193,15 @@ export class Catalog {
             )
             .get()?.value
         : undefined;
-      if (savedVersion !== undefined && savedVersion !== '1')
+      if (
+        savedVersion === '1' ||
+        (savedVersion === undefined && tables.length > 0)
+      )
+        throw new Error('UPGRADE_REQUIRED');
+      if (
+        savedVersion !== undefined &&
+        savedVersion !== String(CURRENT_STORAGE_VERSION)
+      )
         throw new Error('SCHEMA_UNSUPPORTED');
       const auditFormat = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
@@ -339,9 +353,9 @@ export class Catalog {
         }
         this.db
           .prepare(
-            "INSERT INTO catalog_meta(key,value) VALUES('storage_version','1') ON CONFLICT(key) DO NOTHING",
+            "INSERT INTO catalog_meta(key,value) VALUES('storage_version',?) ON CONFLICT(key) DO NOTHING",
           )
-          .run();
+          .run(String(CURRENT_STORAGE_VERSION));
         this.db
           .prepare(
             "INSERT INTO catalog_meta(key,value) VALUES('audit_format','2') ON CONFLICT(key) DO NOTHING",

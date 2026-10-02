@@ -1,6 +1,9 @@
 /** Only reviewed machine codes may cross an API or persistent diagnostic boundary. */
 const codes = new Set([
   'ACCESS_DENIED',
+  'UPGRADE_REQUIRED',
+  'UPGRADE_BASELINE_REQUIRED',
+  'NO_UPGRADE_REQUIRED',
   'EGRESS_DENIED',
   'TEST_CONFIGURATION_DENIED',
   'EGRESS_TIMEOUT',
