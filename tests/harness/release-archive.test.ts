@@ -145,3 +145,77 @@ test('complete archive checking rejects AppleDouble, foreign/duplicate entries, 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('gzip envelope consumes exactly one canonical member and validates CRC/ISIZE/trailer', () => {
+  const root = fixture();
+  try {
+    const original = createReleaseArchive(root);
+    assert.equal(verifyReleaseArchive(original).fileCount, 3);
+    assert.deepEqual(createReleaseArchive(root), original);
+    const empty = gzipSync(Buffer.alloc(0), { level: 9 });
+    empty[9] = 255;
+    const named = Buffer.from(empty);
+    named[3] = 8;
+    const commented = Buffer.from(empty);
+    commented[3] = 16;
+    const extra = Buffer.from(empty);
+    extra[3] = 4;
+    const variants: Record<string, Buffer> = {
+      oneZero: Buffer.concat([original, Buffer.alloc(1)]),
+      zeroSuffix: Buffer.concat([original, Buffer.alloc(512)]),
+      arbitrarySuffix: Buffer.concat([
+        original,
+        Buffer.from('synthetic-trailing-data'),
+      ]),
+      canonicalEmptyMember: Buffer.concat([original, empty]),
+      defaultEmptyMember: Buffer.concat([original, gzipSync(Buffer.alloc(0))]),
+      nonemptyMember: Buffer.concat([
+        original,
+        gzipSync(Buffer.from('synthetic-foreign-data')),
+      ]),
+      namedMember: Buffer.concat([
+        original,
+        named.subarray(0, 10),
+        Buffer.from('SYNTHETIC_PRIVATE_TRAILING_GZIP_NAME\0'),
+        named.subarray(10),
+      ]),
+      commentedMember: Buffer.concat([
+        original,
+        commented.subarray(0, 10),
+        Buffer.from('synthetic-comment\0'),
+        commented.subarray(10),
+      ]),
+      extraMember: Buffer.concat([
+        original,
+        extra.subarray(0, 10),
+        Buffer.from([3, 0, 1, 2, 3]),
+        extra.subarray(10),
+      ]),
+      truncatedTrailer: original.subarray(0, original.length - 1),
+      missingTrailer: original.subarray(0, original.length - 8),
+    };
+    const crc = Buffer.from(original);
+    crc.writeUInt32LE(
+      (crc.readUInt32LE(crc.length - 8) ^ 1) >>> 0,
+      crc.length - 8,
+    );
+    variants.badCRC = crc;
+    const size = Buffer.from(original);
+    size.writeUInt32LE(
+      (size.readUInt32LE(size.length - 4) ^ 1) >>> 0,
+      size.length - 4,
+    );
+    variants.badISIZE = size;
+    const firstName = Buffer.from(original);
+    firstName[3] = 8;
+    variants.firstHeaderName = Buffer.concat([
+      firstName.subarray(0, 10),
+      Buffer.from('synthetic-name\0'),
+      firstName.subarray(10),
+    ]);
+    for (const [name, bytes] of Object.entries(variants))
+      assert.throws(() => verifyReleaseArchive(bytes), Error, name);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -1,6 +1,6 @@
 /** Portable, metadata-free canonical USTAR+gzip; no host tar or xattr APIs. */
 import { createHash } from 'node:crypto';
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { gzipSync, inflateRawSync, crc32 } from 'node:zlib';
 import {
   constants,
   openSync,
@@ -163,7 +163,28 @@ export function verifyReleaseArchive(bytes: Buffer) {
       .equals(Buffer.from([31, 139, 8, 0, 0, 0, 0, 0, 2, 255]))
   )
     fail();
-  const tar = gunzipSync(bytes, { maxOutputLength: MAX_BYTES });
+  // Node24's synchronous info API reports the first raw stream's consumed
+  // input, not the bytes supplied after it. gunzip would silently merge members.
+  // @types/node lacks the documented info-return overload, hence this local cast.
+  const inflated = inflateRawSync(bytes.subarray(10), {
+    info: true,
+    maxOutputLength: MAX_BYTES,
+  }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+  const consumed = inflated.engine.bytesWritten;
+  const trailer = 10 + consumed;
+  if (
+    !Number.isSafeInteger(consumed) ||
+    consumed < 2 ||
+    trailer + 8 !== bytes.length
+  )
+    fail();
+  const tar = inflated.buffer;
+  // CRC32 is Node's native implementation; no bespoke checksum/DEFLATE parser.
+  if (
+    bytes.readUInt32LE(trailer) !== crc32(tar) ||
+    bytes.readUInt32LE(trailer + 4) !== tar.length
+  )
+    fail();
   const files = new Map<string, Buffer>(),
     dirs = new Set<string>();
   let offset = 0,
