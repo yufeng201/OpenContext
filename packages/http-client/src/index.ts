@@ -1,3 +1,6 @@
+import { performance } from 'node:perf_hooks';
+import { setImmediate as yieldEventLoop } from 'node:timers/promises';
+import { isErrorCode } from '@opencontext/contracts/errors';
 import { createHash } from 'node:crypto';
 import { Value } from '@sinclair/typebox/value';
 import type { TSchema } from '@sinclair/typebox';
@@ -117,6 +120,7 @@ export class OpenContextClient {
     } = {},
     diagnosticStatus?: number,
   ): Promise<T> {
+    const deadline = performance.now() + this.timeoutMs;
     const controller = new AbortController();
     const cancel = () => controller.abort('CANCELLED');
     options.signal?.addEventListener('abort', cancel, { once: true });
@@ -128,48 +132,80 @@ export class OpenContextClient {
         0,
         signal.reason === 'CANCELLED' ? 'CANCELLED' : 'TIMEOUT',
       );
+    const check = () => {
+      if (!signal.aborted && performance.now() >= deadline)
+        controller.abort('TIMEOUT');
+      if (signal.aborted) throw aborted();
+    };
     const wait = <U>(operation: Promise<U>): Promise<U> =>
       new Promise((resolve, reject) => {
-        const stop = () => reject(aborted());
-        if (signal.aborted) {
-          operation.catch(() => undefined);
+        const stop = () => {
+          signal.removeEventListener('abort', stop);
           reject(aborted());
+        };
+        try {
+          check();
+        } catch (error) {
+          void operation.catch(() => undefined);
+          reject(error);
           return;
         }
         signal.addEventListener('abort', stop, { once: true });
-        operation
-          .then(resolve, reject)
-          .finally(() => signal.removeEventListener('abort', stop))
-          .catch(() => undefined);
+        void operation.then(
+          (value) => {
+            signal.removeEventListener('abort', stop);
+            try {
+              check();
+              resolve(value);
+            } catch (error) {
+              reject(error);
+            }
+          },
+          (error) => {
+            signal.removeEventListener('abort', stop);
+            reject(error);
+          },
+        );
       });
+    const cancelBody = (response: Response) => {
+      try {
+        void response.body?.cancel().catch(() => undefined);
+      } catch {
+        /* Best-effort cleanup must not expose native diagnostics. */
+      }
+    };
     let response: Response | undefined;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let complete = false;
     try {
-      if (signal.aborted) throw aborted();
-      const operation = this.transport(this.base + path, {
-        method: body ? 'POST' : 'GET',
-        headers: {
-          authorization: 'Bearer ' + this.token,
-          ...(body ? { 'content-type': 'application/json' } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-        redirect: 'error',
-        credentials: 'omit',
-        signal,
+      check();
+      const operation = Promise.resolve().then(() => {
+        check();
+        return this.transport(this.base + path, {
+          method: body ? 'POST' : 'GET',
+          headers: {
+            authorization: 'Bearer ' + this.token,
+            ...(body ? { 'content-type': 'application/json' } : {}),
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+          redirect: 'error',
+          credentials: 'omit',
+          signal,
+        });
       });
-      operation
+      void operation
         .then((r) => {
-          if (signal.aborted) void r.body?.cancel().catch(() => undefined);
+          response = r;
+          if (signal.aborted) cancelBody(r);
         })
         .catch(() => undefined);
       try {
         response = await wait(operation);
-      } catch (error) {
-        if (error instanceof OpenContextError) throw error;
-        throw new OpenContextError(
-          0,
-          signal.aborted ? String(signal.reason) : 'REQUEST_FAILED',
-        );
+      } catch {
+        check();
+        throw new OpenContextError(0, 'REQUEST_FAILED');
       }
+      check();
       const errorStatus = !response.ok && response.status !== diagnosticStatus;
       let data: unknown;
       try {
@@ -195,62 +231,137 @@ export class OpenContextClient {
               ? 'RESPONSE_TOO_LARGE'
               : 'INVALID_RESPONSE',
           );
-        const reader = response.body?.getReader();
+        reader = response.body?.getReader();
         if (!reader)
           throw new OpenContextError(response.status, 'INVALID_RESPONSE');
-        const chunks: Uint8Array[] = [];
-        let size = 0,
-          complete = false;
-        try {
-          while (true) {
-            const part = await wait(reader.read());
-            if (part.done) break;
-            size += part.value.byteLength;
-            if (size > this.maximum)
-              throw new OpenContextError(response.status, 'RESPONSE_TOO_LARGE');
-            chunks.push(part.value);
+        // Copy into bounded owned segments; never retain empty chunks or oversized backing buffers.
+        const segments: Uint8Array[] = [];
+        let current: Uint8Array | undefined,
+          used = 0,
+          size = 0,
+          reads = 0;
+        while (true) {
+          check();
+          if (++reads > 8192)
+            throw new OpenContextError(response.status, 'RESPONSE_WORK_LIMIT');
+          const part = await wait(reader.read());
+          check();
+          if (part.done) break;
+          if (!(part.value instanceof Uint8Array))
+            throw new OpenContextError(response.status, 'INVALID_RESPONSE');
+          size += part.value.byteLength;
+          if (size > this.maximum)
+            throw new OpenContextError(response.status, 'RESPONSE_TOO_LARGE');
+          let offset = 0;
+          while (offset < part.value.byteLength) {
+            check();
+            if (!current || used === current.length) {
+              current = new Uint8Array(
+                Math.min(
+                  65536,
+                  this.maximum - (size - part.value.byteLength + offset),
+                ),
+              );
+              segments.push(current);
+              used = 0;
+            }
+            const count = Math.min(
+              current.length - used,
+              part.value.byteLength - offset,
+            );
+            current.set(part.value.subarray(offset, offset + count), used);
+            used += count;
+            offset += count;
           }
-          data = JSON.parse(
-            new TextDecoder('utf-8', { fatal: true }).decode(
-              Buffer.concat(chunks),
-            ),
-          );
-          complete = true;
-        } finally {
-          if (!complete) void reader.cancel().catch(() => undefined);
-          reader.releaseLock();
+          // Timers and scheduled caller cancellation must run even for immediately ready reads.
+          if (reads % 64 === 0) await wait(yieldEventLoop());
         }
+        check();
+        const bytes = Buffer.concat(
+          segments.map((segment, index) =>
+            index === segments.length - 1 ? segment.subarray(0, used) : segment,
+          ),
+          size,
+        );
+        check();
+        const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        check();
+        data = JSON.parse(decoded);
+        check();
       } catch (error) {
-        if (signal.aborted) throw aborted();
+        check();
         if (errorStatus)
           throw new OpenContextError(response.status, 'HTTP_ERROR');
-        if (error instanceof OpenContextError) throw error;
+        if (error instanceof OpenContextError && isErrorCode(error.code))
+          throw error;
         throw new OpenContextError(response.status, 'INVALID_RESPONSE');
       }
       if (errorStatus) {
         try {
           const parsed = parseQueryError(data);
+          check();
           throw new OpenContextError(
             response.status,
             parsed.error.code,
             parsed.error.correlationId,
           );
         } catch (error) {
-          if (error instanceof OpenContextError) throw error;
+          check();
+          if (error instanceof OpenContextError && isErrorCode(error.code))
+            throw error;
           throw new OpenContextError(response.status, 'HTTP_ERROR');
         }
       }
       if (response.status !== 200 && response.status !== diagnosticStatus)
         throw new OpenContextError(response.status, 'INVALID_RESPONSE');
+      let result: T;
       try {
-        return parseQueryResponse(schema, data, scope) as T;
-      } catch {
+        result = parseQueryResponse(schema, data, scope) as T;
+        check();
+        if (schema === ReadResultSchema) {
+          const read = result as ReadResult;
+          if (
+            createHash('sha256').update(read.text).digest('hex') !==
+            read.file.contentHash
+          )
+            throw new OpenContextError(response.status, 'INVALID_RESPONSE');
+          check();
+        }
+        if (schema === ReadinessReportSchema) {
+          parseReadinessReport(result);
+          check();
+        }
+      } catch (error) {
+        check();
+        if (error instanceof OpenContextError && isErrorCode(error.code))
+          throw error;
         throw new OpenContextError(response.status, 'INVALID_RESPONSE');
       }
+      check();
+      complete = true;
+      return result;
+    } catch (error) {
+      check();
+      if (error instanceof OpenContextError && isErrorCode(error.code))
+        throw error;
+      throw new OpenContextError(0, 'REQUEST_FAILED');
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', cancel);
-      if (signal.aborted) void response?.body?.cancel().catch(() => undefined);
+      if (reader) {
+        if (!complete) {
+          try {
+            void reader.cancel().catch(() => undefined);
+          } catch {
+            /* Best effort. */
+          }
+        }
+        try {
+          reader.releaseLock();
+        } catch {
+          /* Best effort for native cleanup. */
+        }
+      } else if (response && !complete) cancelBody(response);
     }
   }
   async readiness(options: QueryRequestOptions = {}): Promise<ReadinessReport> {
@@ -263,7 +374,7 @@ export class OpenContextClient {
         {},
         503,
       );
-      return parseReadinessReport(result);
+      return result as ReadinessReport;
     } catch (error) {
       if (
         error instanceof OpenContextError &&
@@ -346,11 +457,6 @@ export class OpenContextClient {
       options,
       { projectId, fileId, revisionId },
     );
-    if (
-      createHash('sha256').update(result.text).digest('hex') !==
-      result.file.contentHash
-    )
-      throw new OpenContextError(200, 'INVALID_RESPONSE');
     return result;
   }
 }

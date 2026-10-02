@@ -64,3 +64,5 @@ pnpm exec vitest run tests/integration/query-response.test.ts tests/integration/
 共享成功payload最多16MiB；MCP的text+structuredContent重复包装另按16MiB工具结果预算检查，因此大文件在MCP可能比REST更早拒绝；JSON-RPC transport元数据另有请求上限。超限不能返回截断成功结果。搜索limit仍只是最多命中数，4096 excerpt预算和默认10条保持，不能当总数/搜索分页；本批分页仅限文件集合，projects/search分页尚未提供。
 
 明确的来源历史read保留现有授权语义：来源已删除但binding仍获授权时，固定历史内容可读，其metadata可保留tombstone/invalid；不把freshness当授权凭据。树/搜索仍排除这些条目，无效派生产物及撤源后的历史均拒绝。SDK的schema例外只接纳服务器授权后返回的明确来源历史，不能代替服务器ACL。
+
+SDK整请求使用单调时钟的绝对期限（默认15秒，配置10–15000ms），覆盖transport、headers/body、解码/JSON/schema/citation/readiness和固定正文SHA256；每阶段结束与返回前复验，同步处理过期不能返回成功。单个请求最多8192次body读取（含空chunk/EOF），超限为RESPONSE_WORK_LIMIT；空chunk不保留，自有分段最多64KiB，每64次读取让出事件循环。超过碎片工作预算也会拒绝有效JSON，不能当字节截断或自动retry。同步transport throw、异步reject都稳定转换为REQUEST_FAILED，CLI按共享错误白名单输出。详情及可执行边界测试见[SDK包说明](../packages/http-client/README.md)。

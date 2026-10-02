@@ -255,7 +255,7 @@ export class StaticRegistry {
   list(): PluginDescriptor[] {
     return [...this.entries.entries()].map(([packageRef, entry]) => {
       const { definition } = entry;
-      const status = definition.probe();
+      const status = this.probe(definition);
       return {
         packageRef,
         packageDigest: entry.digest,
@@ -537,6 +537,13 @@ export class StaticRegistry {
       controller.signal.removeEventListener('abort', stop);
     }
   }
+  private probe(definition: PluginDefinition) {
+    try {
+      return definition.probe();
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
+  }
   private entry(
     packageRef: string,
     capability: ExecutableCapability,
@@ -547,7 +554,7 @@ export class StaticRegistry {
       fail('PLUGIN_CAPABILITY_MISMATCH');
     if (digest(entry.definition) !== entry.digest)
       fail('PLUGIN_ARTIFACT_CHANGED');
-    const status = entry.definition.probe();
+    const status = this.probe(entry.definition);
     if (!status.available || !status.capabilities.includes(capability))
       fail('PLUGIN_UNAVAILABLE');
     return entry;

@@ -1,3 +1,4 @@
+import { safeErrorCode } from '../packages/contracts/src/errors.ts';
 import {
   OpenContextClient,
   OpenContextError,
@@ -67,12 +68,7 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (error) {
-  const code =
-    error instanceof OpenContextError
-      ? error.code
-      : error instanceof Error && /^[A-Z][A-Z0-9_]+$/.test(error.message)
-        ? error.message
-        : 'REQUEST_FAILED';
+  const code = safeErrorCode(error, 'REQUEST_FAILED');
   console.error(
     JSON.stringify({
       error: code,

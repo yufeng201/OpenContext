@@ -105,7 +105,7 @@ pnpm exec vitest run packages/plugin-host/tests/registry.test.ts packages/plugin
 
 manifest 必须通过共享 `PluginManifestSchema`：协议固定 `1`、语义版本、合法 namespace ID、能力去重、server/official-trusted-native 和无未知字段；配置 schema 必须是 TypeBox object。`StaticRegistry` 默认每个 async config/import/connection/invoke 操作最多等待 30 秒，整个 registry 同时最多 4 个操作。开发构造参数仅允许 `timeoutMs` 10–30000、`maxConcurrent` 1–16；它们不是未验证的 HTTP 用户配置。
 
-host 向 hook 传入自己的 `AbortSignal`，同时传播调用方取消；HTTP 配置/导入连接断开会取消预检，落盘前再检查取消及当前授权。执行超时返回 `PLUGIN_TIMEOUT`，调用方取消返回 `CANCELLED`，配额耗尽返回 `RESOURCE_BUSY`；连接诊断保留 `CONNECTION_TEST_TIMEOUT/CANCELLED` 契约。只允许受审稳定错误码，未知 native 错误变为 `PROCESSING_FAILED`，不回传正文、凭据或任意 abort reason。
+host 向 hook 传入自己的 `AbortSignal`，同时传播调用方取消；HTTP 配置/导入连接断开会取消预检，落盘前再检查取消及当前授权。执行超时返回 `PLUGIN_TIMEOUT`，调用方取消返回 `CANCELLED`，配额耗尽返回 `RESOURCE_BUSY`；连接诊断保留 `CONNECTION_TEST_TIMEOUT/CANCELLED` 契约。只允许受审稳定错误码，同步 probe 与异步 hook 的未知 native 错误变为 `PROCESSING_FAILED`，不回传正文、凭据或任意 abort reason。
 
 超时或取消后迟到输出不会进入发布。仍在运行的 native Promise **继续占用配额直到实际结束**，避免反复超时绕过并发限制；冻结 import 端口在取消后拒绝读取。同步 CPU 阻塞、任意 native 磁盘/网络访问无法被进程内 timer 中断；永久不结束的操作会持续占槽。恢复需要受控停止整个实例，不提供任意第三方强隔离、自动重试或杀进程承诺。
 

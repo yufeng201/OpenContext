@@ -243,3 +243,49 @@ it('rejects invalid top-level config schema and host limits at registration', ()
       'INVALID_PLUGIN_LIMIT',
     );
 });
+
+for (const stage of ['list', 'prepareSync', 'resolve', 'post-config'] as const)
+  it(`${stage} probe native diagnostics stay within stable host error envelope`, async () => {
+    const secret = 'SYNTHETIC_PRIVATE_UPSTREAM_DIAGNOSTIC';
+    let broken = false;
+    const registry = new StaticRegistry([
+      {
+        ...base,
+        probe: () => {
+          if (broken) throw new Error(secret);
+          return {
+            available: true,
+            capabilities: ['connector'],
+            limitations: [],
+          };
+        },
+        validateConfig: async () => {
+          broken = true;
+        },
+      },
+    ]);
+    const selection = { packageRef: 'fixture.lifecycle@0.1.0', config: {} };
+    const lock = registry.prepareSync(selection, 'connector');
+    if (stage !== 'post-config') broken = true;
+    const operation = () =>
+      stage === 'list'
+        ? registry.list()
+        : stage === 'prepareSync'
+          ? registry.prepareSync(selection, 'connector')
+          : stage === 'resolve'
+            ? registry.resolve(lock, 'connector')
+            : registry.prepare(selection, 'connector');
+    let error: unknown;
+    try {
+      await operation();
+    } catch (e) {
+      error = e;
+    }
+    expect(error).toMatchObject({
+      name: 'PluginHostError',
+      code: 'PROCESSING_FAILED',
+      message: 'PROCESSING_FAILED',
+    });
+    expect(String(error)).not.toContain(secret);
+    expect(JSON.stringify(error)).not.toContain(secret);
+  });
