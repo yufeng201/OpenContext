@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { safeErrorCode } from '@opencontext/contracts/errors';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -10,7 +11,22 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import { Id, ReadSchema, SearchSchema } from '@opencontext/contracts';
+import {
+  parseQueryResponse,
+  QUERY_RESPONSE_MAX_BYTES,
+  FilePageSchema,
+  FilePageInputSchema,
+  TreeSchema,
+  type FilePage,
+  type FilePageInput,
+} from '@opencontext/contracts/query-api';
+import {
+  Id,
+  ReadSchema,
+  SearchSchema,
+  ReadResultSchema,
+  SearchResultSchema,
+} from '@opencontext/contracts';
 import type {
   FileEntry,
   Principal,
@@ -31,6 +47,11 @@ export type McpHandlers = {
   authenticate(request: FastifyRequest): Principal;
   projects(principal: Principal): Project[];
   tree(principal: Principal, projectId: string): FileEntry[];
+  filesPage?(
+    principal: Principal,
+    projectId: string,
+    input: FilePageInput,
+  ): FilePage;
   search(
     principal: Principal,
     projectId: string,
@@ -45,7 +66,7 @@ export type McpHandlers = {
 };
 
 const ProjectSchema = Type.Object(
-  { projectId: Id },
+  { projectId: Id, ...FilePageInputSchema.properties },
   { additionalProperties: false },
 );
 const McpSearchSchema = Type.Object(
@@ -82,6 +103,25 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
                 ? 'Read a fixed file revision; current project authorization still applies.'
                 : 'List current authorized project files; deleted and invalid files are excluded.',
           inputSchema: schema,
+          outputSchema:
+            name === 'context_search'
+              ? SearchResultSchema
+              : name === 'context_read'
+                ? ReadResultSchema
+                : Type.Object(
+                    {},
+                    {
+                      type: 'object',
+                      anyOf: [
+                        Type.Object(
+                          { files: TreeSchema },
+                          { additionalProperties: false },
+                        ),
+                        FilePageSchema,
+                      ],
+                      additionalProperties: true,
+                    },
+                  ),
           annotations: {
             readOnlyHint: true,
             destructiveHint: false,
@@ -94,7 +134,8 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
       try {
         const principal = handlers.authenticate(request);
         const args = message.params.arguments;
-        let result: SearchResult | ReadResult | { files: FileEntry[] };
+        let result:
+          SearchResult | ReadResult | FilePage | { files: FileEntry[] };
         switch (message.params.name) {
           case 'context_search': {
             if (!Value.Check(McpSearchSchema, args))
@@ -103,7 +144,11 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
                 'Invalid search arguments',
               );
             const { projectId, ...input } = args;
-            result = handlers.search(principal, projectId, input);
+            result = parseQueryResponse(
+              SearchResultSchema,
+              handlers.search(principal, projectId, input),
+              { projectId, limit: input.limit ?? 10 },
+            );
             break;
           }
           case 'context_read': {
@@ -112,12 +157,25 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
                 ErrorCode.InvalidParams,
                 'Invalid read arguments',
               );
-            result = handlers.read(
-              principal,
-              args.projectId,
-              args.fileId,
-              args.revisionId,
+            result = parseQueryResponse(
+              ReadResultSchema,
+              handlers.read(
+                principal,
+                args.projectId,
+                args.fileId,
+                args.revisionId,
+              ),
+              {
+                projectId: args.projectId,
+                fileId: args.fileId,
+                revisionId: args.revisionId,
+              },
             );
+            if (
+              createHash('sha256').update(result.text).digest('hex') !==
+              result.file.contentHash
+            )
+              throw new Error('INVALID_RESPONSE');
             break;
           }
           case 'context_tree': {
@@ -126,26 +184,49 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
                 ErrorCode.InvalidParams,
                 'Invalid tree arguments',
               );
+            if (args.limit !== undefined || args.cursor !== undefined) {
+              if (!handlers.filesPage)
+                throw new McpError(
+                  ErrorCode.InvalidParams,
+                  'Invalid tree arguments',
+                );
+              const { projectId, ...input } = args;
+              result = parseQueryResponse(
+                FilePageSchema,
+                handlers.filesPage(principal, projectId, input),
+                { projectId, limit: input.limit ?? 100 },
+              );
+              break;
+            }
             result = {
-              files: handlers
-                .tree(principal, args.projectId)
-                .filter(
-                  (file) =>
-                    file.projectId === args.projectId &&
-                    !file.tombstone &&
-                    file.freshness !== 'invalid',
-                ),
+              files: parseQueryResponse(
+                TreeSchema,
+                handlers
+                  .tree(principal, args.projectId)
+                  .filter(
+                    (file) =>
+                      file.projectId === args.projectId &&
+                      !file.tombstone &&
+                      file.freshness !== 'invalid',
+                  ),
+                { projectId: args.projectId },
+              ),
             };
             break;
           }
           default:
             throw new McpError(ErrorCode.MethodNotFound, 'Unknown tool');
         }
-        handlers.audit?.(request, message.params.name, args, 'OK');
-        return {
-          content: [{ type: 'text', text: JSON.stringify(result) }],
+        const output = {
+          content: [{ type: 'text' as const, text: JSON.stringify(result) }],
           structuredContent: result,
         };
+        if (
+          Buffer.byteLength(JSON.stringify(output)) > QUERY_RESPONSE_MAX_BYTES
+        )
+          throw new Error('RESPONSE_TOO_LARGE');
+        handlers.audit?.(request, message.params.name, args, 'OK');
+        return output;
       } catch (error) {
         handlers.audit?.(
           request,

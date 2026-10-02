@@ -244,11 +244,15 @@ it('SDK rejects invalid JSON, credential-looking error codes and oversized bodie
   const make = (response: Response) =>
     new OpenContextClient({
       baseUrl: 'http://localhost:4310',
-      token: 'synthetic',
+      token: 'synthetic-query-test-token',
       fetch: async () => response,
     });
   await expect(
-    make(new Response('PRIVATE_JSON_SECRET')).projects(),
+    make(
+      new Response('PRIVATE_JSON_SECRET', {
+        headers: { 'content-type': 'application/json' },
+      }),
+    ).projects(),
   ).rejects.toMatchObject({
     message: 'INVALID_RESPONSE',
     code: 'INVALID_RESPONSE',
@@ -263,7 +267,12 @@ it('SDK rejects invalid JSON, credential-looking error codes and oversized bodie
   ).rejects.toMatchObject({ code: 'HTTP_ERROR' });
   await expect(
     make(
-      new Response('x', { headers: { 'content-length': '16777217' } }),
+      new Response('x', {
+        headers: {
+          'content-length': '16777217',
+          'content-type': 'application/json',
+        },
+      }),
     ).projects(),
   ).rejects.toMatchObject({ code: 'RESPONSE_TOO_LARGE' });
   const chunk = new Uint8Array(8_388_609);
@@ -274,7 +283,11 @@ it('SDK rejects invalid JSON, credential-looking error codes and oversized bodie
       else controller.close();
     },
   });
-  await expect(make(new Response(stream)).projects()).rejects.toMatchObject({
+  await expect(
+    make(
+      new Response(stream, { headers: { 'content-type': 'application/json' } }),
+    ).projects(),
+  ).rejects.toMatchObject({
     code: 'RESPONSE_TOO_LARGE',
   });
 });
@@ -286,7 +299,7 @@ it('SDK timeout cancels an actual loopback request and gives a stable error', as
     if (!addr || typeof addr === 'string') throw new Error('INVALID_ADDRESS');
     const client = new OpenContextClient({
       baseUrl: 'http://127.0.0.1:' + addr.port,
-      token: 'synthetic',
+      token: 'synthetic-query-test-token',
       timeoutMs: 50,
     });
     await expect(client.projects()).rejects.toMatchObject({

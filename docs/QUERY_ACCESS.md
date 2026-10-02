@@ -4,7 +4,7 @@
 
 ## API真相源
 
-共享路径在packages/contracts/src/query-api.ts；请求校验仍来自同一TypeBox SearchSchema/ReadSchema。`GET /api/openapi.json`提供OpenAPI3.1的查询子集：projects、tree、search、read。该元数据公开但不含文件或凭据。管理mutation、完整response schema和稳定外部版本兼容承诺仍未交付，不能把子集当成完整管理API。
+共享路径在packages/contracts/src/query-api.ts；请求校验仍来自同一TypeBox SearchSchema/ReadSchema。`GET /api/openapi.json`提供OpenAPI3.1的查询子集：projects、tree、search、read。该元数据公开但不含文件或凭据。查询成功/错误响应已有共享TypeBox运行时校验；管理mutation、完整管理SDK和稳定外部版本兼容承诺仍未交付，不能把子集当成完整管理API。
 
 REST使用Authorization Bearer。树只包含当前有效文件；read必须给精确fileId和revisionId。历史revision依然受当前project/source权限，来源撤权不是改读最新版。服务器的当前授权为准，SDK没有第二套授权缓存。
 
@@ -25,9 +25,9 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 ## TypeScript源码SDK
 
-`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是仓库内私有源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect并默认限时15秒；timeoutMs可在10–15000毫秒内缩短。解码响应上限16MiB，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
+`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。解码响应上限16MiB（maxResponseBytes可收紧至128字节）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
 
-方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。查询正文响应目前是TS契约断言，尚无客户端运行时response schema校验；readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
+方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)、filesPage(projectId,{limit,cursor})。所有方法最后可传{signal}。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。成功响应、错误、分页和固定revision共享TypeBox schema，额外字段/未知形状拒绝而非静默丢弃；read复核正文UTF-8长度和SHA256，citation必须与文件/所请求revision一致。readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 
 可执行合成示例及REST/SDK/MCP一致性、跨project/历史/revoke测试在tests/integration/query-access.test.ts；它们不调用模型。
 
@@ -44,3 +44,23 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 health只代表存活；owner-only readiness检查依赖并在503时输出脱敏JSON、CLI非零退出。离线维护见[备份恢复与诊断](BACKUP_RECOVERY.md)；重启、备份、迁移和安全门槛见[产品就绪矩阵](PRODUCT_READINESS.md)。当前不支持多租户企业生产部署。
 
 search的limit是最多命中数，另受4096字符总excerpt预算（每项最多512）约束，可能少于limit；这不是漏检或分页总量。固定全文需用命中revision再次read。
+
+## 固定快照文件分页与可执行例子
+
+`GET /api/projects/:id/files?limit=100&cursor=...`、SDK `filesPage`、CLI `files PROJECT [LIMIT] [CURSOR]` 和 MCP `context_tree({projectId,limit,cursor})` 共用当前授权与页契约。limit为1–200，默认100，nextCursor为null表示结束；不返回未授权总量。原tree数组/MCP不传分页参数的files对象保持兼容。旧tree拒绝未知query字段，不静默忽略cursor。
+
+游标只表示当前已授权文件集合的读取位置，不是凭据。游标绑定project、head和可见文件集合指纹；来源撤权/发布/head变化令旧游标返回409 CURSOR_STALE，调用方显式从第一页重取。跨project仍先执行当前授权；篡改/无效游标报400 INVALID_CURSOR。不能保证跨写入的长寿命分页快照，不自动改读新的head。
+
+如下命令真正启动合成loopback协议服务、无真实凭据/来源/模型，并清理自有临时服务：
+
+```sh
+pnpm exec vitest run tests/integration/query-response.test.ts tests/integration/query-access.test.ts packages/mcp/tests/query-pagination.test.ts
+```
+
+覆盖REST/TS SDK/CLI/真实MCP SDK分页及固定读取一致性、发布/撤源游标失效、撤token、超时取消与错误脱敏。SDK支持等级为Node24只读源码预览，不提供管理写方法、Python包、OAuth、用户Agent自动配置或生产版本稳定承诺。
+
+请求body/query和响应中的额外字段明确拒绝。JSON错误、错误media type、无效UTF-8、协议字段/固定revision错误均只暴露稳定码，不回显原正文/URL/abort reason。CLI收到SIGINT/SIGTERM取消；SDK非合作transport也有deadline竞争和晚到响应体清理。网络断开不会成为对同步native代码的抢占式终止保证。
+
+共享成功payload最多16MiB；MCP的text+structuredContent重复包装另按16MiB工具结果预算检查，因此大文件在MCP可能比REST更早拒绝；JSON-RPC transport元数据另有请求上限。超限不能返回截断成功结果。搜索limit仍只是最多命中数，4096 excerpt预算和默认10条保持，不能当总数/搜索分页；本批分页仅限文件集合，projects/search分页尚未提供。
+
+明确的来源历史read保留现有授权语义：来源已删除但binding仍获授权时，固定历史内容可读，其metadata可保留tombstone/invalid；不把freshness当授权凭据。树/搜索仍排除这些条目，无效派生产物及撤源后的历史均拒绝。SDK的schema例外只接纳服务器授权后返回的明确来源历史，不能代替服务器ACL。

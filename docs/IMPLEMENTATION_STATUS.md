@@ -68,7 +68,7 @@ codex mcp add opencontext --url http://127.0.0.1:4310/mcp --bearer-token-env-var
 
 真实Chromium流程见 apps/web/README.md（仓库路径）：登录→建空间→Git同步→搜索/固定原文重载→Markdown产物共同召回→390px窄屏→退出；包含跳过提示，无本地storage token。环境没有Browser插件，使用系统Chromium与Playwright，实际查看桌面和窄屏截图。独立浏览器还验证项目切换、重复提交、错误恢复、来源与token撤权、320px视口及真实服务停机重启。在线阅读器每3秒重验授权，收到404清空缓存正文和路径；这是有检测窗口的轮询，不能即时收回已复制字节。Firefox/WebKit、真实模型工具采用率未验证。
 
-当前MCP没有分页/截断提示、read分块、精确token或完整响应预算、历史snapshot search；只有1–50的search命中上限、512码元单摘录及4096码元摘录总上限，元数据和正文read不计入该预算。domain拒绝目前由SDK表达为协议错误，未完成细化的工具错误契约。管理后台没有任务取消、来源配置在线修改（错误分支需重新添加）；health只证明进程存活，未检查所有已发布对象完整性。
+当前MCP/REST/Node源码SDK已有共享TypeBox查询响应校验、固定revision一致性与文件集合游标分页；读取正文验证UTF-8长度/hash，成功payload/工具包装另受16MiB上限。没有read分块、精确token预算、projects/search分页或历史snapshot search；1–50的search命中上限、512码元单摘录及4096码元摘录总上限保持，不能称总数。domain拒绝目前由SDK表达为协议错误，未完成细化的工具错误契约。管理后台没有任务取消、来源配置在线修改（错误分支需重新添加）；health只证明进程存活，未检查所有已发布对象完整性。
 
 当前未做：物理断电测试、生产备份/恢复工具、正式TLS部署包、私有Git凭据、远程Companion、人工编辑/提升界面、纠正关系API、完整OutputSet delta/第三方publisher、真实飞书授权验收、向量、完整配置DAG或插件市场。核心保护的纯规则/单元测试不替代这些端到端功能。首次用户可用成功已验证，不以此勾选整个PRD/P1。
 

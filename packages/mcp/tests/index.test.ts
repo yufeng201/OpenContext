@@ -66,7 +66,7 @@ async function fixture() {
       file,
       text,
       citation: {
-        uri: `oc://project/${projectId}/file/${fileId}@${revisionId}`,
+        uri: `oc://space/${projectId}/file/${fileId}@${revisionId}`,
         projectId,
         fileId,
         revisionId,

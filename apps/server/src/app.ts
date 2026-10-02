@@ -14,9 +14,20 @@ import {
   assertCompleteRoot,
   inspectStorage,
 } from '@opencontext/state-sqlite/maintenance';
-import { QueryRoutes, QueryOpenApi } from '@opencontext/contracts/query-api';
+import { pageFiles } from './query-pages.ts';
+import {
+  QueryRoutes,
+  QueryOpenApi,
+  parseQueryResponse,
+  ProjectsSchema,
+  TreeSchema,
+  FilePageSchema,
+  FilePageQuerySchema,
+  EmptyQuerySchema,
+  type FilePageInput,
+} from '@opencontext/contracts/query-api';
 import Fastify, { type FastifyRequest } from 'fastify';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname } from 'node:path';
 import {
@@ -25,6 +36,8 @@ import {
   SearchSchema,
   LoginSchema,
   ReadSchema,
+  ReadResultSchema,
+  SearchResultSchema,
   MAX_AUTH_TOKEN_LENGTH,
   CreatePluginBindingSchema,
   ImportUploadSchema,
@@ -348,6 +361,8 @@ export function createApplication(options: ApplicationOptions) {
           : catalog.getRevisionCommit(projectId, fileId, revisionId);
       if (!commitId) throw new Error('NOT_FOUND');
       const text = store.readText(file.contentHash);
+      if (createHash('sha256').update(text).digest('hex') !== file.contentHash)
+        throw new Error('CORRUPT_OBJECT');
       authorize(principal, projectId);
       return {
         file,
@@ -479,55 +494,63 @@ export function createApplication(options: ApplicationOptions) {
               : safeErrorCode(error);
     requestCodes.set(request, code);
     const status =
-      code === 'UNSUPPORTED_MEDIA_TYPE'
-        ? 415
-        : code === 'PAYLOAD_TOO_LARGE'
-          ? 413
-          : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
-            ? 429
-            : [
-                  'CONNECTION_TEST_TIMEOUT',
-                  'AUDIT_QUEUE_FULL',
-                  'AUDIT_UNAVAILABLE',
-                ].includes(code)
-              ? 503
-              : code === 'UNAUTHORIZED'
-                ? 401
-                : ['FORBIDDEN', 'UNTRUSTED_HOST', 'UNTRUSTED_ORIGIN'].includes(
-                      code,
-                    )
-                  ? 403
-                  : code === 'NOT_FOUND'
-                    ? 404
-                    : [
-                          'HEAD_MOVED',
-                          'OUTPUT_CONFLICT',
-                          'LEASE_LOST',
-                          'BINDING_REVOKED',
-                          'IMPORT_CONFLICT',
-                          'INPUT_CHANGED',
-                          'PLUGIN_LOCK_MISMATCH',
-                          'PLUGIN_ARTIFACT_CHANGED',
-                        ].includes(code)
-                      ? 409
-                      : code === 'INVALID_SCHEMA' ||
-                          /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
-                            code,
-                          ) ||
-                          code.startsWith('INVALID_') ||
-                          [
-                            'IMPORT_LIMIT',
-                            'IMPORTS_NOT_SUPPORTED',
-                            'PLUGIN_NOT_FOUND',
-                            'UNKNOWN_PLUGIN',
-                            'PLUGIN_CAPABILITY_MISMATCH',
-                            'CAPABILITY_OR_INSTANCE_MISMATCH',
-                            'CAPABILITY_MISSING',
-                            'PLUGIN_UNAVAILABLE',
-                            'CONNECTION_TEST_UNSUPPORTED',
+      code === 'INVALID_RESPONSE'
+        ? 500
+        : code === 'RESPONSE_TOO_LARGE'
+          ? 503
+          : code === 'CURSOR_STALE'
+            ? 409
+            : code === 'UNSUPPORTED_MEDIA_TYPE'
+              ? 415
+              : code === 'PAYLOAD_TOO_LARGE'
+                ? 413
+                : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
+                  ? 429
+                  : [
+                        'CONNECTION_TEST_TIMEOUT',
+                        'AUDIT_QUEUE_FULL',
+                        'AUDIT_UNAVAILABLE',
+                      ].includes(code)
+                    ? 503
+                    : code === 'UNAUTHORIZED'
+                      ? 401
+                      : [
+                            'FORBIDDEN',
+                            'UNTRUSTED_HOST',
+                            'UNTRUSTED_ORIGIN',
                           ].includes(code)
-                        ? 400
-                        : 500;
+                        ? 403
+                        : code === 'NOT_FOUND'
+                          ? 404
+                          : [
+                                'HEAD_MOVED',
+                                'OUTPUT_CONFLICT',
+                                'LEASE_LOST',
+                                'BINDING_REVOKED',
+                                'IMPORT_CONFLICT',
+                                'INPUT_CHANGED',
+                                'PLUGIN_LOCK_MISMATCH',
+                                'PLUGIN_ARTIFACT_CHANGED',
+                              ].includes(code)
+                            ? 409
+                            : code === 'INVALID_SCHEMA' ||
+                                /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+                                  code,
+                                ) ||
+                                code.startsWith('INVALID_') ||
+                                [
+                                  'IMPORT_LIMIT',
+                                  'IMPORTS_NOT_SUPPORTED',
+                                  'PLUGIN_NOT_FOUND',
+                                  'UNKNOWN_PLUGIN',
+                                  'PLUGIN_CAPABILITY_MISMATCH',
+                                  'CAPABILITY_OR_INSTANCE_MISMATCH',
+                                  'CAPABILITY_MISSING',
+                                  'PLUGIN_UNAVAILABLE',
+                                  'CONNECTION_TEST_UNSUPPORTED',
+                                ].includes(code)
+                              ? 400
+                              : 500;
     void reply.code(status).send({
       error: {
         code,
@@ -597,8 +620,14 @@ export function createApplication(options: ApplicationOptions) {
     );
     return { ok: true };
   });
-  app.get(QueryRoutes.projects, (request) =>
-    services.projects(authenticate(request)),
+  app.get(
+    QueryRoutes.projects,
+    { schema: { querystring: EmptyQuerySchema } },
+    (request) =>
+      parseQueryResponse(
+        ProjectsSchema,
+        services.projects(authenticate(request)),
+      ),
   );
   app.post<{ Body: { name: string } }>(
     QueryRoutes.projects,
@@ -813,24 +842,67 @@ export function createApplication(options: ApplicationOptions) {
           catalog.getBinding(run.bindingId)?.active,
       );
   });
-  app.get<{ Params: ProjectParams }>(QueryRoutes.tree, (request) =>
-    services.tree(authenticate(request), request.params.id),
+  app.get<{ Params: ProjectParams }>(
+    QueryRoutes.tree,
+    { schema: { querystring: EmptyQuerySchema } },
+    (request) =>
+      parseQueryResponse(
+        TreeSchema,
+        services.tree(authenticate(request), request.params.id),
+        { projectId: request.params.id },
+      ),
+  );
+  app.get<{
+    Params: ProjectParams;
+    Querystring: { limit?: string; cursor?: string };
+  }>(
+    QueryRoutes.files,
+    { schema: { querystring: FilePageQuerySchema } },
+    (request) => {
+      const files = services.tree(authenticate(request), request.params.id);
+      const input: FilePageInput = {
+        ...(request.query.limit ? { limit: Number(request.query.limit) } : {}),
+        ...(request.query.cursor ? { cursor: request.query.cursor } : {}),
+      };
+      return parseQueryResponse(
+        FilePageSchema,
+        pageFiles(
+          request.params.id,
+          catalog.head(request.params.id),
+          files,
+          input,
+        ),
+        { projectId: request.params.id, limit: input.limit ?? 100 },
+      );
+    },
   );
   app.post<{ Params: ProjectParams; Body: SearchInput }>(
     QueryRoutes.search,
     { schema: { body: SearchSchema } },
     (request) =>
-      services.search(authenticate(request), request.params.id, request.body),
+      parseQueryResponse(
+        SearchResultSchema,
+        services.search(authenticate(request), request.params.id, request.body),
+        { projectId: request.params.id, limit: request.body.limit ?? 10 },
+      ),
   );
   app.get<{
     Params: ProjectParams;
     Querystring: { fileId: string; revisionId: string };
   }>(QueryRoutes.read, { schema: { querystring: ReadSchema } }, (request) =>
-    services.read(
-      authenticate(request),
-      request.params.id,
-      request.query.fileId,
-      request.query.revisionId,
+    parseQueryResponse(
+      ReadResultSchema,
+      services.read(
+        authenticate(request),
+        request.params.id,
+        request.query.fileId,
+        request.query.revisionId,
+      ),
+      {
+        projectId: request.params.id,
+        fileId: request.query.fileId,
+        revisionId: request.query.revisionId,
+      },
     ),
   );
   app.post<{ Params: ProjectParams }>('/api/projects/:id/tokens', (request) => {
@@ -922,7 +994,13 @@ export function createApplication(options: ApplicationOptions) {
       return { audit: status, delivered, budget: 100 };
     },
   );
-  registerMcp(app, services);
+  registerMcp(app, {
+    ...services,
+    filesPage(principal, projectId, input) {
+      const files = services.tree(principal, projectId);
+      return pageFiles(projectId, catalog.head(projectId), files, input);
+    },
+  });
   const webRoot = resolve(options.webRoot ?? 'apps/web/dist');
   app.get('/*', (request, reply) => {
     if (request.url.startsWith('/api/') || request.url.startsWith('/mcp'))

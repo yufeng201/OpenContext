@@ -51,12 +51,17 @@ export type Principal = {
   role: 'owner' | 'reader';
   projectId: string | null;
 };
-export type Project = {
-  id: string;
-  name: string;
-  head: string | null;
-  createdAt: string;
-};
+export const ProjectSchema = Type.Object(
+  {
+    id: Id,
+    name: Type.String({ minLength: 1, maxLength: 80 }),
+    head: Type.Union([Id, Type.Null()]),
+    createdAt: Type.String({ minLength: 1, maxLength: 64 }),
+  },
+  { additionalProperties: false },
+);
+export type Project = Static<typeof ProjectSchema>;
+
 export type Binding = {
   id: string;
   projectId: string;
@@ -70,47 +75,86 @@ export type Binding = {
   sourceVersion: string | null;
   lastError: string | null;
 };
-export type FileEntry = {
-  fileId: string;
-  revisionId: string;
-  contentHash: string;
-  bytes: number;
-  projectId: string;
-  bindingId: string;
-  slotKey: string;
-  logicalPath: string;
-  collection: Collection;
-  ownership: 'source_managed' | 'generated' | 'human_owned';
-  freshness: Freshness;
-  tombstone: boolean;
-  sourceVersion: string;
-  createdAt: string;
-  derivedFrom: { fileId: string; revisionId: string }[];
-};
-export type Citation = {
-  uri: string;
-  projectId: string;
-  fileId: string;
-  revisionId: string;
-  commitId: string;
-  path: string;
-  contentHash: string;
-  sourceVersion: string;
-};
-export type SearchHit = {
-  file: FileEntry;
-  excerpt: string;
-  citation: Citation;
-  score: number;
-};
-export type SearchResult = {
-  servedCommit: string | null;
-  hits: SearchHit[];
-  indexCoverage: 'ready' | 'partial';
-  degraded: boolean;
-  mode: 'fts' | 'grep';
-};
-export type ReadResult = { file: FileEntry; text: string; citation: Citation };
+export const FileEntrySchema = Type.Object(
+  {
+    fileId: Id,
+    revisionId: Id,
+    contentHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+    bytes: Type.Integer({ minimum: 0, maximum: 104857600 }),
+    projectId: Id,
+    bindingId: Id,
+    slotKey: Type.String({ minLength: 1, maxLength: 2000 }),
+    logicalPath: Type.String({ minLength: 1, maxLength: 2000 }),
+    collection: CollectionSchema,
+    ownership: Type.Union([
+      Type.Literal('source_managed'),
+      Type.Literal('generated'),
+      Type.Literal('human_owned'),
+    ]),
+    freshness: Type.Union([
+      Type.Literal('fresh'),
+      Type.Literal('stale'),
+      Type.Literal('invalid'),
+    ]),
+    tombstone: Type.Boolean(),
+    sourceVersion: Type.String({ minLength: 1, maxLength: 2000 }),
+    createdAt: Type.String({ minLength: 1, maxLength: 64 }),
+    derivedFrom: Type.Array(
+      Type.Object(
+        { fileId: Id, revisionId: Id },
+        { additionalProperties: false },
+      ),
+      { maxItems: 10000 },
+    ),
+  },
+  { additionalProperties: false },
+);
+export type FileEntry = Static<typeof FileEntrySchema>;
+export const CitationSchema = Type.Object(
+  {
+    uri: Type.String({ minLength: 1, maxLength: 2000 }),
+    projectId: Id,
+    fileId: Id,
+    revisionId: Id,
+    commitId: Id,
+    path: Type.String({ minLength: 1, maxLength: 2000 }),
+    contentHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+    sourceVersion: Type.String({ minLength: 1, maxLength: 2000 }),
+  },
+  { additionalProperties: false },
+);
+export type Citation = Static<typeof CitationSchema>;
+export const SearchHitSchema = Type.Object(
+  {
+    file: FileEntrySchema,
+    excerpt: Type.String({ maxLength: 512 }),
+    citation: CitationSchema,
+    score: Type.Number(),
+  },
+  { additionalProperties: false },
+);
+export type SearchHit = Static<typeof SearchHitSchema>;
+export const SearchResultSchema = Type.Object(
+  {
+    servedCommit: Type.Union([Id, Type.Null()]),
+    hits: Type.Array(SearchHitSchema, { maxItems: 50 }),
+    indexCoverage: Type.Union([Type.Literal('ready'), Type.Literal('partial')]),
+    degraded: Type.Boolean(),
+    mode: Type.Union([Type.Literal('fts'), Type.Literal('grep')]),
+  },
+  { additionalProperties: false },
+);
+export type SearchResult = Static<typeof SearchResultSchema>;
+export const ReadResultSchema = Type.Object(
+  {
+    file: FileEntrySchema,
+    text: Type.String({ maxLength: 16777216 }),
+    citation: CitationSchema,
+  },
+  { additionalProperties: false },
+);
+export type ReadResult = Static<typeof ReadResultSchema>;
+
 export type Run = {
   id: string;
   projectId: string;

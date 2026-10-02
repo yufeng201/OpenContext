@@ -577,7 +577,7 @@ it('FileStore rejects existing and dangling internal symlinks before reading or 
 it('readiness SDK refuses arbitrary503 error bodies instead of echoing secret fields', async () => {
   const client = new OpenContextClient({
     baseUrl: 'http://127.0.0.1:4310',
-    token: 'synthetic-only',
+    token: 'synthetic-only-client-token',
     fetch: async () =>
       new Response(
         JSON.stringify({ secret: 'must-not-echo', path: '/private/user/path' }),
