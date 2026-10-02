@@ -456,7 +456,7 @@ it('automatic restart recovery is bounded, backlog yields503, and subsequent hea
   });
 });
 
-it('upgrades the legacy audit table without losing existing effects or best-effort records', () => {
+it('rejects lost current audit shape without erasing effects or the remaining legacy record', () => {
   const f = fixture();
   const event = auditEvent(
     'token.create',
@@ -474,18 +474,25 @@ it('upgrades the legacy audit table without losing existing effects or best-effo
   f.catalog.db
     .prepare('INSERT INTO audit_events(time,event_json) VALUES(?,?)')
     .run(event.time, JSON.stringify(legacy));
-  const catalog = f.reopen();
-  expect(catalog.getProject(f.project.id)?.id).toBe(f.project.id);
-  expect(catalog.getBinding(f.binding.id)?.active).toBe(true);
-  expect(catalog.auditPending().pending).toBe(0);
-  const rows = catalog.auditEvents(0, 100).events;
-  expect(rows).toHaveLength(1);
-  expect(rows[0]?.id).toBe(event.id);
-  expect(rows[0]?.guarantee).toBe('best_effort');
-  catalog.revokeToken(f.reader.id);
-  expect(catalog.auditPending().pending).toBe(1);
-  catalog.deliverAuditBatch();
-  expect(catalog.auditEvents(0, 100).events).toHaveLength(2);
+  f.close();
+  const before = readFileSync(f.path);
+  expect(() => new Catalog(f.path)).toThrow('SCHEMA_INCOMPLETE');
+  expect(readFileSync(f.path)).toEqual(before);
+  const db = new DatabaseSync(f.path, { readOnly: true });
+  try {
+    expect(
+      db.prepare('SELECT id FROM projects WHERE id=?').get(f.project.id)?.id,
+    ).toBe(f.project.id);
+    expect(
+      JSON.parse(
+        String(
+          db.prepare('SELECT event_json FROM audit_events').get()?.event_json,
+        ),
+      ).id,
+    ).toBe(event.id);
+  } finally {
+    db.close();
+  }
 });
 
 function application(f: ReturnType<typeof fixture>) {
@@ -659,16 +666,13 @@ it('offline schema validation rejects missing unique index and startup refuses d
   expect(inspectStorage(f.root, f.catalog.db).checks.migration.ok).toBe(false);
   f.close();
   const before = readFileSync(f.path);
-  expect(() => new Catalog(f.path)).toThrow('SCHEMA_UNSUPPORTED');
+  expect(() => new Catalog(f.path)).toThrow('SCHEMA_INCOMPLETE');
   expect(readFileSync(f.path)).toEqual(before);
 });
-it('offline validation accepts reviewed legacy ledger and preserves a valid persisted gap in snapshots', async () => {
+it('offline validation preserves a complete current ledger and a valid persisted gap in snapshots', async () => {
   const f = fixture();
   new FileStore(f.root);
   new TextIndex(f.catalog.db);
-  f.catalog.db.exec(
-    "DROP TABLE audit_pending; ALTER TABLE audit_events DROP COLUMN delivered_at; DROP INDEX audit_event_id; DELETE FROM catalog_meta WHERE key='audit_format';",
-  );
   expect(inspectStorage(f.root, f.catalog.db).ready).toBe(true);
   const db = f.reopen();
   db.setAuditReadGap(true);

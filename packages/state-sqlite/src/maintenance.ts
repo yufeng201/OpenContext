@@ -4,6 +4,7 @@ import {
   type BackupManifest,
 } from '@opencontext/contracts/maintenance';
 import { DatabaseSync, backup } from 'node:sqlite';
+import { validateCatalogSchema } from './schema.ts';
 import { validateAuditStorage } from './audit-storage.ts';
 import { parseAuditEvent } from '@opencontext/contracts/audit';
 import { createHash, randomUUID } from 'node:crypto';
@@ -252,6 +253,7 @@ export function inspectStorage(
       .get()?.value;
     if (auditFormat !== undefined && auditFormat !== '2')
       fail('SCHEMA_UNSUPPORTED');
+    if (version === String(STORAGE_FORMAT)) validateCatalogSchema(db);
     validateAuditStorage(db);
     for (const [table, column] of [
       ['bindings', 'connector_json'],
@@ -292,14 +294,15 @@ export function inspectStorage(
         fail('CHECK_LIMIT_EXCEEDED');
       return data;
     };
-    const revisions = db
-      .prepare('SELECT entry_json,content_hash FROM revisions')
-      .all();
+    const revisions = db.prepare('SELECT * FROM revisions').all();
     if (revisions.length > LIMITS.files) fail('CHECK_LIMIT_EXCEEDED');
     result.counts.revisions = revisions.length;
     for (const row of revisions) {
       const f = JSON.parse(String(row.entry_json)) as FileEntry;
       if (
+        f.projectId !== row.project_id ||
+        f.fileId !== row.file_id ||
+        f.revisionId !== row.revision_id ||
         !/^[a-f0-9]{64}$/.test(f.contentHash) ||
         f.contentHash !== row.content_hash ||
         ![f.fileId, f.revisionId].every((id) => /^[a-zA-Z0-9-]+$/.test(id))
@@ -327,8 +330,9 @@ export function inspectStorage(
         if (JSON.stringify(rev[field]) !== JSON.stringify(f[field]))
           fail('CORRUPT_REVISION');
     }
+    const manifests = new Map<string, FileEntry[]>();
     for (const row of db
-      .prepare('SELECT project_id,id,manifest_hash FROM commits')
+      .prepare('SELECT project_id,id,parent_id,manifest_hash FROM commits')
       .all()) {
       if (
         ![row.project_id, row.id].every(
@@ -344,23 +348,50 @@ export function inspectStorage(
         schemaVersion: string;
         projectId: string;
         commitId: string;
+        parent: string | null;
         files: FileEntry[];
       };
       if (
         manifest.schemaVersion !== '1' ||
         manifest.projectId !== row.project_id ||
         manifest.commitId !== row.id ||
+        manifest.parent !== row.parent_id ||
+        (row.parent_id !== null &&
+          !db
+            .prepare('SELECT id FROM commits WHERE project_id=? AND id=?')
+            .get(row.project_id!, row.parent_id!)) ||
         !Array.isArray(manifest.files)
       )
         fail('CORRUPT_MANIFEST');
+      manifests.set(
+        String(row.project_id) + '/' + String(row.id),
+        manifest.files,
+      );
+      const ids = new Set<string>();
       for (const f of manifest.files) {
+        if (ids.has(f.fileId)) fail('CORRUPT_MANIFEST');
+        ids.add(f.fileId);
         const r = db
           .prepare(
-            'SELECT content_hash FROM revisions WHERE project_id=? AND file_id=? AND revision_id=?',
+            'SELECT content_hash,entry_json,first_commit FROM revisions WHERE project_id=? AND file_id=? AND revision_id=?',
           )
           .get(f.projectId, f.fileId, f.revisionId);
         if (f.projectId !== row.project_id || r?.content_hash !== f.contentHash)
           fail('CORRUPT_REFERENCE');
+        const revision = JSON.parse(String(r.entry_json)) as FileEntry;
+        for (const field of [
+          'fileId',
+          'revisionId',
+          'contentHash',
+          'bytes',
+          'projectId',
+          'bindingId',
+          'createdAt',
+          'sourceVersion',
+          'derivedFrom',
+        ] as const)
+          if (JSON.stringify(f[field]) !== JSON.stringify(revision[field]))
+            fail('CORRUPT_REFERENCE');
       }
     }
     for (const row of db
@@ -371,8 +402,75 @@ export function inspectStorage(
       const data = load(`content/blobs/${h.slice(0, 2)}/${h}`);
       if (sha(data) !== h || data.length !== row.bytes) fail('CORRUPT_OBJECT');
     }
+    for (const row of db.prepare('SELECT * FROM revisions').all()) {
+      const files = manifests.get(
+        String(row.project_id) + '/' + String(row.first_commit),
+      );
+      if (
+        !files?.some(
+          (f) => f.fileId === row.file_id && f.revisionId === row.revision_id,
+        )
+      )
+        fail('CORRUPT_REFERENCE');
+    }
     for (const row of db.prepare('SELECT id,head FROM projects').all()) {
       result.counts.projects++;
+      const rows = db
+        .prepare('SELECT * FROM current_files WHERE project_id=?')
+        .all(row.id!);
+      const files =
+        row.head === null
+          ? []
+          : manifests.get(String(row.id) + '/' + String(row.head));
+      if (!files || files.length !== rows.length) fail('CORRUPT_HEAD');
+      const entries = rows.map(
+        (r) => JSON.parse(String(r.entry_json)) as FileEntry,
+      );
+      const invalid = new Set(
+        entries
+          .filter(
+            (f) =>
+              !db
+                .prepare('SELECT active FROM bindings WHERE id=?')
+                .get(f.bindingId)?.active,
+          )
+          .map((f) => f.fileId),
+      );
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const f of entries)
+          if (
+            !invalid.has(f.fileId) &&
+            f.derivedFrom.some((d) => invalid.has(d.fileId))
+          ) {
+            invalid.add(f.fileId);
+            changed = true;
+          }
+      }
+      for (const current of rows) {
+        const entry = JSON.parse(String(current.entry_json)) as FileEntry;
+        if (
+          entry.projectId !== current.project_id ||
+          entry.fileId !== current.file_id ||
+          entry.revisionId !== current.revision_id ||
+          entry.bindingId !== current.binding_id ||
+          entry.logicalPath !== current.logical_path ||
+          Number(entry.tombstone) !== current.tombstone
+        )
+          fail('CORRUPT_REFERENCE');
+        const pinned = files.find((f) => f.fileId === entry.fileId);
+        if (!pinned) fail('CORRUPT_HEAD');
+        const expected = { ...pinned };
+        // Source revocation updates authorization/freshness without publishing a new content head.
+        if (entry.freshness === 'invalid' && pinned.freshness !== 'invalid') {
+          if (!invalid.has(entry.fileId)) fail('CORRUPT_HEAD');
+          expected.freshness = 'invalid';
+        }
+        for (const field of Object.keys(expected) as (keyof FileEntry)[])
+          if (JSON.stringify(entry[field]) !== JSON.stringify(expected[field]))
+            fail('CORRUPT_HEAD');
+      }
       if (
         row.head !== null &&
         !db

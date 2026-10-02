@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   rmSync,
+  readFileSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -382,7 +383,7 @@ describe('SQLite authority with synthetic local data', () => {
     const running = claim(catalog, binding);
     const queued = catalog.enqueue(binding.id, 'process');
     catalog.db.exec(
-      'ALTER TABLE bindings DROP COLUMN connector_json; ALTER TABLE bindings DROP COLUMN processor_json; ALTER TABLE runs DROP COLUMN execution_json;',
+      'UPDATE bindings SET connector_json=NULL,processor_json=NULL; UPDATE runs SET execution_json=NULL;',
     );
     catalog.close();
     open.delete(catalog);
@@ -779,7 +780,7 @@ describe('SQLite authority with synthetic local data', () => {
     expect(resumed.getRun(run.id)?.state).toBe('queued');
   });
 
-  it('treats legacy databases as private and refuses demo before any migration', () => {
+  it('rejects missing mode and columns in schema2 before run recovery', () => {
     const { catalog, binding, dbPath } = fixture();
     const run = claim(catalog, binding);
     catalog.db.exec(
@@ -790,7 +791,7 @@ describe('SQLite authority with synthetic local data', () => {
     expect(() => {
       const wrong = new Catalog(dbPath, { mode: 'demo' });
       open.add(wrong);
-    }).toThrow('DATA_MODE_MISMATCH');
+    }).toThrow('SCHEMA_INCOMPLETE');
     const inspection = new DatabaseSync(dbPath, { readOnly: true });
     try {
       expect(
@@ -811,14 +812,9 @@ describe('SQLite authority with synthetic local data', () => {
     } finally {
       inspection.close();
     }
-    const resumed = new Catalog(dbPath);
-    open.add(resumed);
-    expect(
-      resumed.db
-        .prepare("SELECT value FROM catalog_meta WHERE key='deployment_mode'")
-        .get()?.value,
-    ).toBe('private');
-    expect(resumed.getRun(run.id)?.state).toBe('queued');
+    const before = readFileSync(dbPath);
+    expect(() => new Catalog(dbPath)).toThrow('SCHEMA_INCOMPLETE');
+    expect(readFileSync(dbPath)).toEqual(before);
   });
 
   it('closes idempotently and permits independent in-memory authorities', () => {
@@ -835,17 +831,18 @@ describe('SQLite authority with synthetic local data', () => {
     open.delete(b);
   });
 
-  it('uses the same lifetime authority for a symlink alias and retains the lock file', () => {
+  it('refuses symlink aliases and retains the canonical lifetime lock file', () => {
     const { catalog, dbPath } = fixture();
     const alias = `${dbPath}.alias`;
     symlinkSync(dbPath, alias);
-    expect(() => new Catalog(alias)).toThrow('CATALOG_IN_USE');
+    expect(() => new Catalog(alias)).toThrow('UNSAFE_SYMLINK');
     expect(existsSync(`${dbPath}.authority.sqlite`)).toBe(true);
     catalog.close();
     open.delete(catalog);
     expect(() => catalog.close()).not.toThrow();
     expect(existsSync(`${dbPath}.authority.sqlite`)).toBe(true);
-    const reopened = new Catalog(alias);
+    expect(() => new Catalog(alias)).toThrow('UNSAFE_SYMLINK');
+    const reopened = new Catalog(dbPath);
     open.add(reopened);
     expect(() => new Catalog(dbPath)).toThrow('CATALOG_IN_USE');
   });
@@ -942,16 +939,23 @@ describe('SQLite authority with synthetic local data', () => {
     expect(recovered.getRun(current.id)?.skipped).toEqual(skipped);
   });
 
-  it('adds the skipped diagnostics column to an existing pre-diagnostics database', () => {
+  it('rejects a missing schema2 diagnostics column without recovering its queued run', () => {
     const { catalog, binding, dbPath } = fixture();
     const queued = catalog.enqueue(binding.id, 'sync');
     catalog.db.exec('ALTER TABLE runs DROP COLUMN skipped_json');
     catalog.close();
     open.delete(catalog);
-    const migrated = new Catalog(dbPath);
-    open.add(migrated);
-    expect(migrated.getRun(queued.id)?.skipped).toEqual([]);
-    expect(migrated.claim()?.id).toBe(queued.id);
+    const before = readFileSync(dbPath);
+    expect(() => new Catalog(dbPath)).toThrow('SCHEMA_INCOMPLETE');
+    expect(readFileSync(dbPath)).toEqual(before);
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        db.prepare('SELECT state FROM runs WHERE id=?').get(queued.id)?.state,
+      ).toBe('queued');
+    } finally {
+      db.close();
+    }
   });
 
   it('revokes source and transitive derived reads without rewriting historical revisions', () => {
