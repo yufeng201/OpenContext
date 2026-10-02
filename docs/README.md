@@ -11,6 +11,7 @@
 - [插件开发](PLUGIN_DEVELOPMENT.md)：当前静态可信 connector/processor 注册与锁定机制，区别实际接口和八类目标。
 - [实施状态](IMPLEMENTATION_STATUS.md)：实现事实与未实现项；协议连通不等于模型自主调用通过。
 - [开发指南](DEVELOPMENT.md)：工程检查、测试与贡献流程。
+- [离线 live 验收 gate](LIVE_GATE.md)：脱敏调用证据、固定版本/hash/引用关联与失败拒绝；合成通过不代表真实模型通过。
 
 ## 产品设计
 
