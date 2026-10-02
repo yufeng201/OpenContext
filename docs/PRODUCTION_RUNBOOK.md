@@ -101,3 +101,5 @@ schema1快照恢复成schema1；用受审兼容schema1旧release启动该新目�
 `SCHEMA_INCOMPLETE` 表示已有 schema2 控制库缺失必需表、列、标记或约束。停止实例并保留原目录和诊断证据；使用受审的完整停写快照恢复到新目录，再核对固定版本和审计账本。不能通过补表、删除库或手改 schema/audit 标记来消除错误。仅新的空库允许初始化，旧合法 schema1 仍走显式新目录升级。
 
 数据库、authority、WAL/SHM 文件及父目录的符号链接被 `UNSAFE_SYMLINK` 拒绝；硬链接/非普通文件被 `UNSAFE_FILE` 拒绝。使用普通私有目录和文件；保留 `.restore-incomplete` 隔离目录，不能绕过标记启动。`CORRUPT_HEAD`/`CORRUPT_REFERENCE` 表示 head manifest、当前文件或历史行引用不一致，备份校验与恢复拒绝该快照；保留证据并选择已验证完整的快照，不自动重建丢失内容。
+
+若 control.sqlite 缺失且数据根目录非空，启动以 `DATA_ROOT_NOT_EMPTY` 拒绝，且不新建控制库或 authority。保留原内容并从已验证联合快照恢复至新目录；不能让空控制库掩盖丢失的索引、授权和账本。

@@ -861,10 +861,18 @@ describe('SQLite authority with synthetic local data', () => {
     } finally {
       lock.close();
     }
-    // The failed instance owns no active connection. Replace only its synthetic
-    // corrupt control data; retain the authority file throughout recovery.
+    // Authority is released, but deleting control data cannot authorize a blank
+    // replacement in the old nonempty root. Recover only into a new directory.
     rmSync(dbPath);
-    const repaired = new Catalog(dbPath, { mode: 'demo' });
+    const before = readFileSync(`${dbPath}.authority.sqlite`);
+    expect(() => new Catalog(dbPath, { mode: 'demo' })).toThrow(
+      'DATA_ROOT_NOT_EMPTY',
+    );
+    expect(existsSync(dbPath)).toBe(false);
+    expect(readFileSync(`${dbPath}.authority.sqlite`)).toEqual(before);
+    const repaired = new Catalog(join(root, 'new', 'control.sqlite'), {
+      mode: 'demo',
+    });
     open.add(repaired);
     expect(
       repaired.db

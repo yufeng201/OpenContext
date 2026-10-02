@@ -292,3 +292,22 @@ it('an existing empty database is refused; a genuinely new database initializes 
     reopened.close();
   }
 });
+
+it('server refuses a missing control database in a nonempty data root before creating any database or authority', () => {
+  const root = mkdtempSync(join(tmpdir(), 'oc-orphaned-data-'));
+  roots.push(root);
+  mkdirSync(join(root, 'content'));
+  const path = join(root, 'content', 'synthetic-evidence');
+  writeFileSync(path, 'preserve original evidence');
+  const before = readFileSync(path);
+  expect(() =>
+    createApplication({
+      dataRoot: root,
+      ownerToken: 'synthetic-orphan-owner-0000000000000000',
+      autoStart: false,
+    }),
+  ).toThrow('DATA_ROOT_NOT_EMPTY');
+  expect(existsSync(join(root, 'control.sqlite'))).toBe(false);
+  expect(existsSync(join(root, 'control.sqlite.authority.sqlite'))).toBe(false);
+  expect(readFileSync(path)).toEqual(before);
+});

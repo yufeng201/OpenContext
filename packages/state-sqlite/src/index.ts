@@ -11,7 +11,13 @@ import {
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync, lstatSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  lstatSync,
+  readdirSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { assertCompleteRoot, noLinks } from './maintenance.ts';
@@ -90,6 +96,12 @@ function canonicalDatabasePath(dbPath: string): string {
       if (!stat.isFile() || stat.nlink !== 1) throw new Error('UNSAFE_FILE');
     }
   }
+  if (
+    !existsSync(absolute) &&
+    existsSync(dirname(absolute)) &&
+    readdirSync(dirname(absolute)).length > 0
+  )
+    throw new Error('DATA_ROOT_NOT_EMPTY');
   mkdirSync(dirname(absolute), { recursive: true });
   return existsSync(absolute)
     ? realpathSync(absolute)
