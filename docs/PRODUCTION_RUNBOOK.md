@@ -45,6 +45,49 @@ pnpm start
 
 已有owner环境由操作员提供。没有自启/OS/TLS配置写入；默认127.0.0.1，任何远程入口先完成[部署安全](DEPLOYMENT_SECURITY.md)的真实TLS、Origin和日志脱敏门禁。启动后分别确认公开health存活、owner readiness依赖、固定read和权限负例。preflight是停写检查，实例存活会拒绝，不是在线probe。
 
+## Node 发行目录与服务生命周期
+
+当前发行是 Node24.19.0 原生 TypeScript 服务入口及预构建 Web，不使用开发热重载。构建机仍需要完整冻结安装；运行机只安装锁定的生产依赖。发行目录仅提供 start、preflight、admin、cli 运行路径；完整开发检查/构建/演练必须在源码 checkout 执行，文档跨页链接以完整源码文档站为准。发行工具按显式文件白名单复制 src、workspace manifests/lock、Web dist 和离线 admin/preflight/cli 与部署示例，排除运行库、秘密、环境文件、Git 与 node_modules。release-manifest.json 给出每个文件 SHA256、treeHash、sourceCommit/sourceDirty；dirty=true 不能当成精确 commit 发行。归档时间戳未规范化，不承诺压缩包逐字节重现。treeHash 是内容摘要，不是签名或来源认证。
+
+```sh
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm check
+# OUTPUT 必须不存在且位于源码目录外
+pnpm release:build /absolute/private/OUTPUT
+cd /absolute/private/OUTPUT
+pnpm install --prod --frozen-lockfile --ignore-scripts
+# 由操作员预置一个已有秘密文件；绝对路径、普通文件、仅 owner 可读写
+export OPENCONTEXT_OWNER_TOKEN_FILE=/absolute/private/owner-token
+export OPENCONTEXT_DATA_ROOT=/absolute/private/new-data
+export NODE_ENV=production
+export PORT=4310
+node scripts/preflight.ts
+node --max-old-space-size=512 apps/server/src/main.ts
+```
+
+不得同时配置 OWNER_TOKEN 与 OWNER_TOKEN_FILE。秘密文件不允许末级 symlink、group/world 权限或超限；最多256 ASCII字符，可带一个尾部换行。生产入口不生成或打印秘密，只输出受审错误码。环境秘密仍兼容，但服务日志/环境读取权限应由部署操作员控制。Feishu 的明确环境 secretRef 解析保持原契约，不自动发现凭据。
+
+最小健康验证：公开 GET /api/health 为存活信息，不能代替带 owner 的 GET /api/readiness；后者核验存储、索引、审计、调度器。先检查两者，再使用合成空间的固定 search/read 与权限负例。异常时不要删锁或数据库。信号 SIGINT/SIGTERM 开始停止领取并取消原生工作，再排空已接受 HTTP 请求；完成后关闭审计及单写者锁。OPENCONTEXT_SHUTDOWN_TIMEOUT_MS 默认15000，允许100–60000。超时以 SHUTDOWN_TIMEOUT 和 exit1 终止，可能留下 running 任务；新 incarnation 把它们重新排队并递增 fencing，提交门禁拒绝旧执行结果。恢复不能保证外部副作用 exactly-once，也不能中断阻塞事件循环的同步 native 代码。进程生命周期由前台终端或操作员服务管理器承担，本实现不安装自启。
+
+生产启动前要求实际 V8 heap limit 至少256MiB，文件系统可用空间至少64MiB；OPENCONTEXT_MIN_FREE_BYTES 可上调，不可下调底线。准入失败发生在创建/获取数据写者前；它们不是持续容量监控或磁盘配额。Node --max-old-space-size=512 仅限制 old heap，RSS、CPU、native分配和磁盘仍须 OS 配额与告警。既有 body/任务/插件并发等应用预算继续生效，不表示完全隔离。
+
+## 容器与 Linux 服务示例及支持矩阵
+
+[Dockerfile](../deploy/Dockerfile)、[Compose](../deploy/compose.yaml)、[systemd unit](../deploy/opencontext.service) 是仓库示例，没有在用户 Mac 启用服务或修改网络安全设置。Dockerfile 的 build context 必须是上述白名单发行目录；操作员从仓库取 Dockerfile，显式提供经核验 digest 的 包含Node24.19.0和Git的基础镜像，不使用猜测 hash；官方 slim Node镜像通常不带Git，不能直接当此受审基础镜像。pnpm11.19.0固定安装、运行依赖冻结且禁 scripts。此阶段没有镜像签名/SBOM或离线 registry 保证。
+
+Compose 使用预构建受审 image、127.0.0.1 发布端口、只读根、丢弃 capabilities、768MiB/1CPU/128pids 和有限 tmpfs。容器内部显式0.0.0.0需 OPENCONTEXT_PUBLIC_ORIGIN HTTPS origin，实际 TLS reverse proxy 由操作员另行验收；origin 配置不会自动安装 TLS。私有 data 目录和 owner 文件由操作员提前准备为 uid1000、目录0700/文件0400或0600；外部 bind secret 是只读，不内嵌入 image/Compose。不可给第二个实例同一 data mount。Git 工作区/大导入消耗持久数据卷，必须独立磁盘限额；64MiB tmpfs不是数据卷限额。
+
+systemd 示例要求操作员已有 Linux 用户、绝对 Node路径、外部 EnvironmentFile 指向 owner 文件和持久数据路径，20秒停止预算大于默认15秒应用期限；只在 /var/lib/opencontext 可写，768MiB/CPU/pids 为示例限制。不要在 Mac 安装或 enable 此 unit，也不要把静态文件检查当 Linux 运行证据。
+
+| 路径                          | 本批支持/验证方式                                  | 保留限制                                                            |
+| ----------------------------- | -------------------------------------------------- | ------------------------------------------------------------------- |
+| Mac Node24.19.0 + pnpm11.19.0 | 实际隔离冻结生产安装、前台启动、信号/重启/失败检查 | 单机预览，无自启、长稳或工业SLO                                     |
+| Linux Node24.19.0             | 可审阅相同发行入口和 systemd 示例                  | 本机未执行 Linux 服务/cgroup，需目标机验收                          |
+| Docker/Compose                | 静态资源/卷/入口配置示例                           | 本执行器无 Docker/Podman/nerdctl；镜像 build/run 未测，不算部署通过 |
+| 多写者/共享网络文件系统/HA    | 不支持                                             | 不得绕过锁或多副本写同库                                            |
+
+升级/回滚仍按下节停写、完整快照、另一个不存在目录执行；发行目录与数据路径分别切换。相同 schema 的补丁发行也先备份，保留上一份 manifest/锁/完整程序。schema2数据不得交给schema1旧程序；回滚到旧程序必须同时恢复兼容的预升级快照，保留新实例期间写入/授权证据。不要用复制新 src 覆盖运行中的旧 release 代替停机验收。
+
 ## 停机升级与切换
 
 正常停止所有该目录的写者并等退出；保留旧release、授权变更记录和原数据目录。离线命令应在没有OPENCONTEXT_QUERY_TOKEN的操作员环境执行，不能用reader身份授权维护。

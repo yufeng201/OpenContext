@@ -1076,6 +1076,10 @@ export function createApplication(options: ApplicationOptions) {
       .header('X-Content-Type-Options', 'nosniff')
       .send(readStaticAsset(webRoot, path));
   });
+  // Stop claiming/cancel native work before waiting for already accepted HTTP requests.
+  app.addHook('preClose', async () => {
+    await coordinator.stop();
+  });
   app.addHook('onClose', async () => {
     await coordinator.stop();
     auditDispatcher.stop();

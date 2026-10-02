@@ -1,0 +1,28 @@
+# Linux systemd example only: do not enable on the user Mac.
+[Unit]
+Description=OpenContext single writer
+After=network.target
+
+[Service]
+Type=simple
+User=opencontext
+Group=opencontext
+WorkingDirectory=/opt/opencontext/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/opencontext/runtime.env
+ExecStart=/opt/node-24.19.0/bin/node --max-old-space-size=512 apps/server/src/main.ts
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/opencontext
+MemoryMax=768M
+CPUQuota=100%
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
