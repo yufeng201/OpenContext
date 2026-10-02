@@ -47,13 +47,16 @@ pnpm start
 
 ## Node 发行目录与服务生命周期
 
-当前发行是 Node24.19.0 原生 TypeScript 服务入口及预构建 Web，不使用开发热重载。构建机仍需要完整冻结安装；运行机只安装锁定的生产依赖。发行目录仅提供 start、preflight、admin、cli 运行路径；完整开发检查/构建/演练必须在源码 checkout 执行，文档跨页链接以完整源码文档站为准。发行工具按显式文件白名单复制 src、workspace manifests/lock、Web dist 和离线 admin/preflight/cli 与部署示例，排除运行库、秘密、环境文件、Git 与 node_modules。release-manifest.json 给出每个文件 SHA256、treeHash、sourceCommit/sourceDirty；dirty=true 不能当成精确 commit 发行。归档时间戳未规范化，不承诺压缩包逐字节重现。treeHash 是内容摘要，不是签名或来源认证。
+当前发行是 Node24.19.0 原生 TypeScript 服务入口及预构建 Web，不使用开发热重载。构建机仍需要完整冻结安装；运行机只安装锁定的生产依赖。发行目录提供 start、preflight、admin、cli 和归档验证运行路径；完整开发检查/构建/演练必须在源码 checkout 执行，文档跨页链接以完整源码文档站为准。发行工具按显式文件白名单复制 src、workspace manifests/lock、Web dist 和离线 admin/preflight/cli 与部署示例，排除运行库、秘密、环境文件、Git 与 node_modules。release-manifest.json 给出每个文件 SHA256、treeHash、sourceCommit/sourceDirty；dirty=true 不能当成精确 commit 发行。归档通过 Node24 标准 USTAR/gzip 实现，不调用系统 tar 或读取 xattr/resource fork；固定 mode、uid/gid、mtime、空 owner 名及中立 gzip OS字段，不产生 AppleDouble。仅接受 manifest 的完整文件集合（加 manifest 本身）和精确祖先目录；拒绝多余/缺失/重复文件或目录、链接/特殊条目、绝对/点段/非规范路径、非零 padding/附加数据与不匹配 hash。解压大小64MiB、成员2048、manifest文件1024上限；hash不是来源认证，同样须核验可信交付包整体 SHA256。相同 Node24.19.0与文件字节/manifest下本机验证归档字节可重复；尚未实跑Linux构建，不以此宣称跨系统位级重现。treeHash 是内容摘要，不是签名或来源认证。
 
 ```sh
 pnpm install --frozen-lockfile --ignore-scripts
 pnpm check
 # OUTPUT 必须不存在且位于源码目录外
 pnpm release:build /absolute/private/OUTPUT
+# 首装前归档：OUTPUT 必须干净且只含 manifest 规定内容
+pnpm release:archive build /absolute/private/OUTPUT /absolute/private/OUTPUT.tgz
+pnpm release:archive verify /absolute/private/OUTPUT.tgz
 cd /absolute/private/OUTPUT
 pnpm install --prod --frozen-lockfile --ignore-scripts
 # 由操作员预置一个已有秘密文件；绝对路径、普通文件、仅 owner 可读写
@@ -67,7 +70,7 @@ node --max-old-space-size=512 apps/server/src/main.ts
 
 不得同时配置 OWNER_TOKEN 与 OWNER_TOKEN_FILE。秘密文件不允许末级 symlink、group/world 权限或超限；最多256 ASCII字符，可带一个尾部换行。生产入口不生成或打印秘密，只输出受审错误码。环境秘密仍兼容，但服务日志/环境读取权限应由部署操作员控制。Feishu 的明确环境 secretRef 解析保持原契约，不自动发现凭据。
 
-最小健康验证：公开 GET /api/health 为存活信息，不能代替带 owner 的 GET /api/readiness；后者核验存储、索引、审计、调度器。先检查两者，再使用合成空间的固定 search/read 与权限负例。异常时不要删锁或数据库。信号 SIGINT/SIGTERM 开始停止领取并取消原生工作，再排空已接受 HTTP 请求；完成后关闭审计及单写者锁。OPENCONTEXT_SHUTDOWN_TIMEOUT_MS 默认15000，允许100–60000。超时以 SHUTDOWN_TIMEOUT 和 exit1 终止，可能留下 running 任务；新 incarnation 把它们重新排队并递增 fencing，提交门禁拒绝旧执行结果。恢复不能保证外部副作用 exactly-once，也不能中断阻塞事件循环的同步 native 代码。进程生命周期由前台终端或操作员服务管理器承担，本实现不安装自启。
+最小健康验证：公开 GET /api/health 为存活信息，不能代替带 owner 的 GET /api/readiness；后者核验存储、索引、审计、调度器。先检查两者，再使用合成空间的固定 search/read 与权限负例。异常时不要删锁或数据库。信号 SIGINT/SIGTERM 开始停止领取并取消原生工作，再排空已接受 HTTP 请求；完成后关闭审计及单写者锁。OPENCONTEXT_SHUTDOWN_TIMEOUT_MS 默认15000，允许100–60000。关闭期限 timer 保持 referenced，直到成功/失败清理；即使 socket 已关闭且 close hook 只有悬挂 Promise，也不能提前当成功退出。超时以 SHUTDOWN_TIMEOUT 和 exit1 终止，可能留下 running 任务；新 incarnation 把它们重新排队并递增 fencing，提交门禁拒绝旧执行结果。恢复不能保证外部副作用 exactly-once，也不能中断阻塞事件循环的同步 native 代码。进程生命周期由前台终端或操作员服务管理器承担，本实现不安装自启。
 
 生产启动前要求实际 V8 heap limit 至少256MiB，文件系统可用空间至少64MiB；OPENCONTEXT_MIN_FREE_BYTES 可上调，不可下调底线。准入失败发生在创建/获取数据写者前；它们不是持续容量监控或磁盘配额。Node --max-old-space-size=512 仅限制 old heap，RSS、CPU、native分配和磁盘仍须 OS 配额与告警。既有 body/任务/插件并发等应用预算继续生效，不表示完全隔离。
 

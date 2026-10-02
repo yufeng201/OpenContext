@@ -33,7 +33,8 @@
     "drill:load": "node scripts/load-drill.ts",
     "preflight": "node scripts/preflight.ts",
     "drill:deploy": "node scripts/deployment-drill.ts",
-    "release:build": "pnpm build && node scripts/package-release.ts"
+    "release:build": "pnpm build && node scripts/package-release.ts",
+    "release:archive": "node scripts/release-archive.ts"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",

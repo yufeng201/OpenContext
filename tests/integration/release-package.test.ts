@@ -37,6 +37,7 @@ it('creates a deterministic content manifest from the allowlist and excludes unr
       'scripts/admin.ts',
       'scripts/preflight.ts',
       'scripts/opencontext.ts',
+      'scripts/release-archive.ts',
       'deploy/Dockerfile',
       'deploy/compose.yaml',
       'deploy/opencontext.service',

@@ -73,7 +73,12 @@ export function packageRelease(source: string, target: string): object {
       }
     }
   }
-  for (const script of ['admin.ts', 'preflight.ts', 'opencontext.ts'])
+  for (const script of [
+    'admin.ts',
+    'preflight.ts',
+    'opencontext.ts',
+    'release-archive.ts',
+  ])
     tree(join('scripts', script));
   for (const file of ['Dockerfile', 'compose.yaml', 'opencontext.service'])
     tree(join('deploy', file));

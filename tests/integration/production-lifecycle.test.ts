@@ -315,3 +315,45 @@ it('shutdown failure exits and projects only its stable code', async () => {
   );
   expect(p.output + p.error).not.toContain(token);
 });
+
+async function boundedExit(p: ReturnType<typeof child>, limitMs: number) {
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      p.closed,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('CHILD_EXIT_UPPER_BOUND')),
+          limitMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+it('retains the shutdown deadline after the real socket closes and a handle-free close hook hangs', async () => {
+  const p = child(
+    root(),
+    { FIXTURE_CLOSE_HANG: '1', OPENCONTEXT_SHUTDOWN_TIMEOUT_MS: '350' },
+    true,
+  );
+  await address(p);
+  const started = performance.now();
+  p.c.kill('SIGTERM');
+  await until(() => p.output.includes('fixture_close_entered'));
+  p.c.kill('SIGINT'); // A second signal must not release/restart the deadline.
+  expect(await boundedExit(p, 2000)).toEqual([1, null]);
+  expect(performance.now() - started).toBeGreaterThanOrEqual(300);
+  expect(p.error).toContain('SHUTDOWN_TIMEOUT');
+  expect(p.output).not.toContain('shutdown_complete');
+  expect((p.output.match(/shutdown_started/g) ?? []).length).toBe(1);
+});
+it('clears the referenced long deadline on successful close and exits before the upper bound', async () => {
+  const p = child(root(), { OPENCONTEXT_SHUTDOWN_TIMEOUT_MS: '60000' }, true);
+  await address(p);
+  p.c.kill('SIGINT');
+  expect(await boundedExit(p, 2000)).toEqual([0, null]);
+  expect(p.output).toContain('shutdown_complete');
+  expect(p.error).not.toContain('SHUTDOWN_TIMEOUT');
+});

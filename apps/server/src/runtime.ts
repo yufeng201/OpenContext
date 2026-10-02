@@ -19,7 +19,8 @@ export async function serve(
       console.error(JSON.stringify({ error: 'SHUTDOWN_TIMEOUT' }));
       process.exit(1);
     }, config.shutdownTimeoutMs);
-    deadline.unref();
+    // Awaited promises do not keep Node alive: this deadline must stay referenced
+    // even after the listening socket and every other handle have closed.
     try {
       await app.close();
       console.log(JSON.stringify({ event: 'shutdown_complete' }));

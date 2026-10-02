@@ -27,6 +27,11 @@ if (process.env['FIXTURE_CLOSE_FAIL'] === '1')
   application.app.addHook('onClose', async () => {
     throw new Error('synthetic-private-close-diagnostic');
   });
+if (process.env['FIXTURE_CLOSE_HANG'] === '1')
+  application.app.addHook('onClose', async () => {
+    console.log('fixture_close_entered');
+    await new Promise(() => {});
+  });
 application.app.get('/fixture/drain', async () => {
   console.log('fixture_request_entered');
   await delay(Number(process.env['FIXTURE_REQUEST_MS'] ?? '150'));
