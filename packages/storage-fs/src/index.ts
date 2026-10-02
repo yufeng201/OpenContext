@@ -4,15 +4,23 @@ import {
   existsSync,
   fsyncSync,
   mkdirSync,
+  lstatSync,
   openSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, resolve, relative, sep } from 'node:path';
+import { dirname, resolve, relative, sep, isAbsolute } from 'node:path';
 import type { FileEntry } from '@opencontext/contracts';
 
+function rejectLink(path: string): void {
+  try {
+    if (lstatSync(path).isSymbolicLink()) throw new Error('UNSAFE_SYMLINK');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
 export function hash(bytes: string | Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
@@ -28,13 +36,20 @@ export class FileStore {
   readonly root: string;
   constructor(dataRoot: string) {
     this.root = resolve(dataRoot, 'content');
+    rejectLink(this.root);
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
     syncDirectory(dirname(this.root));
   }
   private path(...parts: string[]): string {
     const path = resolve(this.root, ...parts);
-    if (relative(this.root, path).startsWith('..' + sep))
+    const rel = relative(this.root, path);
+    if (rel === '..' || isAbsolute(rel) || rel.startsWith('..' + sep))
       throw new Error('INVALID_PATH');
+    let component = this.root;
+    for (const part of rel.split(sep).filter(Boolean)) {
+      component = resolve(component, part);
+      rejectLink(component);
+    }
     return path;
   }
   private ensureDirectory(path: string): void {

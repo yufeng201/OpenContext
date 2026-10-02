@@ -1,3 +1,4 @@
+import { safeErrorCode } from '@opencontext/contracts/errors';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -21,6 +22,12 @@ import type {
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 
 export type McpHandlers = {
+  audit?(
+    request: FastifyRequest,
+    tool: string,
+    args: unknown,
+    code: string,
+  ): void;
   authenticate(request: FastifyRequest): Principal;
   projects(principal: Principal): Project[];
   tree(principal: Principal, projectId: string): FileEntry[];
@@ -84,59 +91,85 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
       };
     });
     server.setRequestHandler(CallToolRequestSchema, (message) => {
-      const principal = handlers.authenticate(request);
-      const args = message.params.arguments;
-      let result: SearchResult | ReadResult | { files: FileEntry[] };
-      switch (message.params.name) {
-        case 'context_search': {
-          if (!Value.Check(McpSearchSchema, args))
-            throw new McpError(
-              ErrorCode.InvalidParams,
-              'Invalid search arguments',
+      try {
+        const principal = handlers.authenticate(request);
+        const args = message.params.arguments;
+        let result: SearchResult | ReadResult | { files: FileEntry[] };
+        switch (message.params.name) {
+          case 'context_search': {
+            if (!Value.Check(McpSearchSchema, args))
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                'Invalid search arguments',
+              );
+            const { projectId, ...input } = args;
+            result = handlers.search(principal, projectId, input);
+            break;
+          }
+          case 'context_read': {
+            if (!Value.Check(McpReadSchema, args))
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                'Invalid read arguments',
+              );
+            result = handlers.read(
+              principal,
+              args.projectId,
+              args.fileId,
+              args.revisionId,
             );
-          const { projectId, ...input } = args;
-          result = handlers.search(principal, projectId, input);
-          break;
+            break;
+          }
+          case 'context_tree': {
+            if (!Value.Check(ProjectSchema, args))
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                'Invalid tree arguments',
+              );
+            result = {
+              files: handlers
+                .tree(principal, args.projectId)
+                .filter(
+                  (file) =>
+                    file.projectId === args.projectId &&
+                    !file.tombstone &&
+                    file.freshness !== 'invalid',
+                ),
+            };
+            break;
+          }
+          default:
+            throw new McpError(ErrorCode.MethodNotFound, 'Unknown tool');
         }
-        case 'context_read': {
-          if (!Value.Check(McpReadSchema, args))
-            throw new McpError(
-              ErrorCode.InvalidParams,
-              'Invalid read arguments',
-            );
-          result = handlers.read(
-            principal,
-            args.projectId,
-            args.fileId,
-            args.revisionId,
+        handlers.audit?.(request, message.params.name, args, 'OK');
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result) }],
+          structuredContent: result,
+        };
+      } catch (error) {
+        handlers.audit?.(
+          request,
+          message.params.name,
+          message.params.arguments,
+          error instanceof McpError ? 'INVALID_SCHEMA' : safeErrorCode(error),
+        );
+        if (error instanceof McpError) {
+          const known = [
+            new McpError(ErrorCode.InvalidParams, 'Invalid search arguments'),
+            new McpError(ErrorCode.InvalidParams, 'Invalid read arguments'),
+            new McpError(ErrorCode.InvalidParams, 'Invalid tree arguments'),
+            new McpError(ErrorCode.MethodNotFound, 'Unknown tool'),
+          ].find(
+            (candidate) =>
+              candidate.code === error.code &&
+              candidate.message === error.message,
           );
-          break;
+          if (known) throw known;
         }
-        case 'context_tree': {
-          if (!Value.Check(ProjectSchema, args))
-            throw new McpError(
-              ErrorCode.InvalidParams,
-              'Invalid tree arguments',
-            );
-          result = {
-            files: handlers
-              .tree(principal, args.projectId)
-              .filter(
-                (file) =>
-                  file.projectId === args.projectId &&
-                  !file.tombstone &&
-                  file.freshness !== 'invalid',
-              ),
-          };
-          break;
-        }
-        default:
-          throw new McpError(ErrorCode.MethodNotFound, 'Unknown tool');
+        // Deliberately discard arbitrary native causes before SDK serialization.
+        // eslint-disable-next-line preserve-caught-error
+        throw new Error(safeErrorCode(error));
       }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result) }],
-        structuredContent: result,
-      };
     });
     const transport = new StreamableHTTPServerTransport({
       enableJsonResponse: true,
@@ -148,6 +181,7 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
     reply.raw.once('close', () => {
       void server.close();
     });
+    reply.raw.setHeader('X-Request-Id', request.id);
     reply.hijack();
     try {
       await transport.handleRequest(request.raw, reply.raw, request.body);

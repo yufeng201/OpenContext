@@ -35,3 +35,13 @@ PRD AC-01–AC-22、用户流程 UJ-01–UJ-13 仍是待实现的应用验收。
 历史原稿与 checkpoint 仅留工作区，未改字节；公开源码不依赖私有归档或临时验收材料。源码以 Git 提交为准，设计阅读包与早期 harness 检查点不能替代当前实现。项目许可证与账户权限未在本轮变更。
 
 企业与接入成熟度、缺口及下一阶段验收见 [产品就绪矩阵](PRODUCT_READINESS.md)。当前仅为受控开发预览。
+
+新增：[查询接入](QUERY_ACCESS.md)、[核心概念](CORE_CONCEPTS.md)、[当前运维边界](OPERATIONS.md)。本地文档站使用`pnpm docs:build`/`pnpm docs:preview`，复用这些指南，不公开发布。
+
+- [停写备份、恢复与依赖诊断](BACKUP_RECOVERY.md)：v1快照、仅新目录恢复、撤权与合成演练。
+
+- [私有部署与安全门槛](DEPLOYMENT_SECURITY.md)：首装/升级预检、TLS前置、已复现风险与SSO决策边界。
+
+本批连接器出站默认策略、真实合成TLS/Git实验与可修改审计基础见[出站与审计](EGRESS_AUDIT.md)；下一阶段一页提案见[团队身份决策](TEAM_IDENTITY_DECISION.md)。
+
+关键写入审计持久性、重试/队列与owner故障恢复见[事务审计](AUDIT_DURABILITY.md)。

@@ -1,3 +1,4 @@
+import { isErrorCode } from '@opencontext/contracts/errors';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Type } from '@sinclair/typebox';
@@ -311,7 +312,10 @@ export class StaticRegistry {
     );
     if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
     this.resolve(lock, 'connector');
-    if (!Value.Check(ConnectionTestResultSchema, result))
+    if (
+      !Value.Check(ConnectionTestResultSchema, result) ||
+      !isErrorCode(result.code)
+    )
       fail('INVALID_PLUGIN_OUTPUT');
     return result;
   }

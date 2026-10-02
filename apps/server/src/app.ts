@@ -1,6 +1,19 @@
+import { AuditDispatcher } from './audit-dispatcher.ts';
+import type { AuditContext } from '@opencontext/contracts/audit';
+import { auditEvent, auditAction } from './audit.ts';
+import type { AuditEvent } from '@opencontext/contracts/audit';
+import { parsePublicOrigin } from './deployment.ts';
+import { safeErrorCode } from '@opencontext/contracts/errors';
+import { readStaticAsset } from './static.ts';
+import { parseReadinessReport } from '@opencontext/contracts/maintenance';
+import {
+  assertCompleteRoot,
+  inspectStorage,
+} from '@opencontext/state-sqlite/maintenance';
+import { QueryRoutes, QueryOpenApi } from '@opencontext/contracts/query-api';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname } from 'node:path';
 import {
   CreateProjectSchema,
@@ -38,9 +51,12 @@ export type ApplicationOptions = {
   dataRoot: string;
   dataMode?: 'demo' | 'private';
   ownerToken: string;
+  publicOrigin?: string;
   allowedLocalRepoRoot?: string;
   webRoot?: string;
   autoStart?: boolean;
+  /** Server-owned deadline; clients cannot choose resource budgets. */
+  connectionTestTimeoutMs?: number;
   registry?: StaticRegistry;
   /** Reviewed server-side dependency injection; never accepted by a client body. */
   feishu?: Omit<FeishuChatOptions, 'stateRoot'>;
@@ -49,6 +65,17 @@ export function createApplication(options: ApplicationOptions) {
   if (options.ownerToken.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
   if (options.ownerToken.length > MAX_AUTH_TOKEN_LENGTH)
     throw new Error('OWNER_TOKEN_TOO_LONG');
+  if (!/^[!-~]+$/.test(options.ownerToken))
+    throw new Error('INVALID_OWNER_TOKEN');
+  const publicOrigin = options.publicOrigin
+    ? parsePublicOrigin(options.publicOrigin)
+    : undefined;
+  assertCompleteRoot(options.dataRoot);
+  if (
+    existsSync(options.dataRoot) &&
+    (statSync(options.dataRoot).mode & 0o077) !== 0
+  )
+    throw new Error('ROOT_PERMISSIONS_UNSAFE');
   const registry =
     options.registry ?? createDefaultRegistry(options.dataRoot, options.feishu);
   mkdirSync(options.dataRoot, { recursive: true, mode: 0o700 });
@@ -64,20 +91,114 @@ export function createApplication(options: ApplicationOptions) {
     throw error;
   }
   const store = new FileStore(options.dataRoot);
+  const auditDispatcher = new AuditDispatcher(catalog);
+  let auditFailure = false;
+  const markReadGap = () => {
+    auditFailure = true;
+    try {
+      catalog.setAuditReadGap(true);
+      auditFailure = false;
+    } catch {
+      /* The in-memory gap remains; never claim persistence. */
+    }
+  };
+  const recordAudit = (event: AuditEvent, replay = true) => {
+    try {
+      if (replay) auditDispatcher.flush();
+      catalog.appendAudit(event);
+    } catch {
+      markReadGap();
+    }
+  };
   const coordinator = new Coordinator(
     catalog,
     store,
     options.dataRoot,
     registry,
     options.allowedLocalRepoRoot,
+    (run, result, code) => {
+      let originRequest: string | null = null;
+      try {
+        originRequest = catalog.auditRequestForJob(run.id);
+      } catch {
+        markReadGap();
+      }
+      recordAudit({
+        ...auditEvent(
+          'task.complete',
+          undefined,
+          { projectId: run.projectId, bindingId: run.bindingId },
+          result,
+          code,
+          originRequest,
+          run.id,
+        ),
+        actor: { id: 'system', role: 'system' },
+      });
+    },
   );
+  const connectionTestTimeoutMs = options.connectionTestTimeoutMs ?? 15_000;
+  if (
+    !Number.isInteger(connectionTestTimeoutMs) ||
+    connectionTestTimeoutMs < 10 ||
+    connectionTestTimeoutMs > 15_000
+  )
+    throw new Error('INVALID_TIMEOUT');
+  let connectionTests = 0;
   const app = Fastify({
     logger: false,
     bodyLimit: 65_536,
+    requestTimeout: 10_000,
+    connectionTimeout: 20_000,
+    keepAliveTimeout: 5_000,
+    maxRequestsPerSocket: 100,
     trustProxy: false,
+    genReqId: () => randomUUID(),
+    requestIdHeader: false,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
   const currentCredentials = new WeakMap<Principal, string>();
+  const requestPrincipals = new WeakMap<FastifyRequest, Principal>();
+  const requestCodes = new WeakMap<FastifyRequest, string>();
+  const requestTargets = new WeakMap<FastifyRequest, Record<string, unknown>>();
+  const requestJobs = new WeakMap<FastifyRequest, string>();
+  const auditedMcp = new WeakSet<FastifyRequest>();
+  const criticalRequests = new WeakSet<FastifyRequest>();
+  function critical<T>(
+    request: FastifyRequest,
+    operation: (context: AuditContext) => T,
+  ): T {
+    const principal = requestPrincipals.get(request);
+    if (!principal || principal.role !== 'owner') throw new Error('FORBIDDEN');
+    let recorded = false;
+    const value = operation({
+      actor: { id: principal.id, role: principal.role },
+      requestId: request.id,
+      onRecorded: () => {
+        recorded = true;
+      },
+    });
+    if (recorded) criticalRequests.add(request);
+    auditDispatcher.flush();
+    return value;
+  }
+  function auditStatus() {
+    const status = auditDispatcher.status();
+    let persisted = false;
+    try {
+      persisted = catalog.auditReadGap();
+    } catch {
+      auditFailure = true;
+    }
+    const readGap = persisted || auditFailure;
+    return {
+      ...status,
+      ok: status.ok && !readGap,
+      code: readGap ? 'AUDIT_UNAVAILABLE' : status.code,
+      readGap,
+      readGapPersisted: persisted && !auditFailure,
+    };
+  }
   function credential(request: FastifyRequest): string {
     const header = request.headers.authorization;
     if (header) return header.startsWith('Bearer ') ? header.slice(7) : '';
@@ -96,6 +217,7 @@ export function createApplication(options: ApplicationOptions) {
       principal = catalog.authenticate(token, options.ownerToken);
     if (!principal) throw new Error('UNAUTHORIZED');
     currentCredentials.set(principal, token);
+    requestPrincipals.set(request, principal);
     return principal;
   }
   function authorize(
@@ -116,6 +238,33 @@ export function createApplication(options: ApplicationOptions) {
   }
   const services = {
     authenticate,
+    audit(request: FastifyRequest, tool: string, args: unknown, code: string) {
+      auditedMcp.add(request);
+      const action =
+        tool === 'context_read'
+          ? 'file.read'
+          : tool === 'context_search'
+            ? 'file.search'
+            : tool === 'context_tree'
+              ? 'file.tree'
+              : 'mcp.tool';
+      recordAudit(
+        auditEvent(
+          action,
+          requestPrincipals.get(request),
+          args && typeof args === 'object'
+            ? (args as Record<string, unknown>)
+            : {},
+          code === 'OK'
+            ? 'success'
+            : ['UNAUTHORIZED', 'FORBIDDEN', 'NOT_FOUND'].includes(code)
+              ? 'denied'
+              : 'failed',
+          code,
+          request.id,
+        ),
+      );
+    },
     projects(principal: Principal) {
       authorize(principal);
       return catalog
@@ -241,80 +390,171 @@ export function createApplication(options: ApplicationOptions) {
     const host = request.headers.host ?? '';
     let hostname: string;
     try {
-      hostname = new URL('http://' + host).hostname;
+      const authority = new URL('http://' + host);
+      if (
+        authority.username ||
+        authority.password ||
+        authority.pathname !== '/' ||
+        authority.search ||
+        authority.hash
+      )
+        throw new Error('UNTRUSTED_HOST');
+      hostname = authority.hostname;
     } catch {
       return done(new Error('UNTRUSTED_HOST'));
     }
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(hostname))
-      return done(new Error('UNTRUSTED_HOST'));
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
+    const proxy =
+      publicOrigin && new URL('https://' + host).host === publicOrigin.host;
+    if (!local && !proxy) return done(new Error('UNTRUSTED_HOST'));
     const origin = request.headers.origin;
-    if (origin && origin !== 'http://' + host && origin !== 'https://' + host)
+    if (
+      origin &&
+      !(proxy
+        ? origin === publicOrigin!.origin
+        : origin === 'http://' + host || origin === 'https://' + host)
+    )
       return done(new Error('UNTRUSTED_ORIGIN'));
     done();
   });
-  app.setErrorHandler((error, _request, reply) => {
-    const message = error instanceof Error ? error.message : '';
+  app.addHook('onSend', (request, reply, _payload, done) => {
+    reply.header('X-Request-Id', request.id);
+    done();
+  });
+  app.addHook('onResponse', (request, reply, done) => {
+    const route = request.routeOptions.url ?? '';
+    if (
+      !criticalRequests.has(request) &&
+      ((route.startsWith('/api/') &&
+        route !== '/api/health' &&
+        route !== '/api/openapi.json') ||
+        (route === '/mcp' && !auditedMcp.has(request)))
+    ) {
+      const code =
+        requestCodes.get(request) ??
+        (reply.statusCode < 400 ? 'OK' : 'INTERNAL_ERROR');
+      const params = (request.params ?? {}) as Record<string, unknown>;
+      const query = (request.query ?? {}) as Record<string, unknown>;
+      recordAudit(
+        auditEvent(
+          auditAction(route, request.method),
+          requestPrincipals.get(request),
+          {
+            ...params,
+            fileId: query['fileId'],
+            revisionId: query['revisionId'],
+            ...requestTargets.get(request),
+          },
+          reply.statusCode < 400
+            ? 'success'
+            : [401, 403, 404].includes(reply.statusCode)
+              ? 'denied'
+              : 'failed',
+          code,
+          request.id,
+          requestJobs.get(request) ?? null,
+        ),
+        route !== '/api/audit/retry',
+      );
+    }
+    done();
+  });
+  app.setErrorHandler((error, request, reply) => {
     const frameworkCode =
       error && typeof error === 'object' && 'code' in error ? error.code : null;
     const code =
-      frameworkCode === 'FST_ERR_CTP_BODY_TOO_LARGE'
-        ? 'PAYLOAD_TOO_LARGE'
-        : frameworkCode === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
-            frameworkCode === 'FST_ERR_CTP_EMPTY_JSON_BODY'
-          ? 'INVALID_JSON'
-          : error && typeof error === 'object' && 'validation' in error
-            ? 'INVALID_SCHEMA'
-            : /^[A-Z][A-Z0-9_]+$/.test(message)
-              ? message
-              : 'INTERNAL_ERROR';
+      frameworkCode === 'FST_ERR_CTP_INVALID_MEDIA_TYPE'
+        ? 'UNSUPPORTED_MEDIA_TYPE'
+        : frameworkCode === 'FST_ERR_CTP_BODY_TOO_LARGE'
+          ? 'PAYLOAD_TOO_LARGE'
+          : frameworkCode === 'FST_ERR_CTP_INVALID_JSON_BODY' ||
+              frameworkCode === 'FST_ERR_CTP_EMPTY_JSON_BODY'
+            ? 'INVALID_JSON'
+            : error && typeof error === 'object' && 'validation' in error
+              ? 'INVALID_SCHEMA'
+              : safeErrorCode(error);
+    requestCodes.set(request, code);
     const status =
-      code === 'PAYLOAD_TOO_LARGE'
-        ? 413
-        : code === 'UNAUTHORIZED'
-          ? 401
-          : ['FORBIDDEN', 'UNTRUSTED_HOST', 'UNTRUSTED_ORIGIN'].includes(code)
-            ? 403
-            : code === 'NOT_FOUND'
-              ? 404
-              : [
-                    'HEAD_MOVED',
-                    'OUTPUT_CONFLICT',
-                    'LEASE_LOST',
-                    'BINDING_REVOKED',
-                    'IMPORT_CONFLICT',
-                    'INPUT_CHANGED',
-                    'PLUGIN_LOCK_MISMATCH',
-                    'PLUGIN_ARTIFACT_CHANGED',
-                  ].includes(code)
-                ? 409
-                : code === 'INVALID_SCHEMA' ||
-                    /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+      code === 'UNSUPPORTED_MEDIA_TYPE'
+        ? 415
+        : code === 'PAYLOAD_TOO_LARGE'
+          ? 413
+          : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
+            ? 429
+            : [
+                  'CONNECTION_TEST_TIMEOUT',
+                  'AUDIT_QUEUE_FULL',
+                  'AUDIT_UNAVAILABLE',
+                ].includes(code)
+              ? 503
+              : code === 'UNAUTHORIZED'
+                ? 401
+                : ['FORBIDDEN', 'UNTRUSTED_HOST', 'UNTRUSTED_ORIGIN'].includes(
                       code,
-                    ) ||
-                    code.startsWith('INVALID_') ||
-                    [
-                      'IMPORT_LIMIT',
-                      'IMPORTS_NOT_SUPPORTED',
-                      'PLUGIN_NOT_FOUND',
-                      'UNKNOWN_PLUGIN',
-                      'PLUGIN_CAPABILITY_MISMATCH',
-                      'CAPABILITY_OR_INSTANCE_MISMATCH',
-                      'CAPABILITY_MISSING',
-                      'PLUGIN_UNAVAILABLE',
-                      'CONNECTION_TEST_UNSUPPORTED',
-                    ].includes(code)
-                  ? 400
-                  : 500;
+                    )
+                  ? 403
+                  : code === 'NOT_FOUND'
+                    ? 404
+                    : [
+                          'HEAD_MOVED',
+                          'OUTPUT_CONFLICT',
+                          'LEASE_LOST',
+                          'BINDING_REVOKED',
+                          'IMPORT_CONFLICT',
+                          'INPUT_CHANGED',
+                          'PLUGIN_LOCK_MISMATCH',
+                          'PLUGIN_ARTIFACT_CHANGED',
+                        ].includes(code)
+                      ? 409
+                      : code === 'INVALID_SCHEMA' ||
+                          /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+                            code,
+                          ) ||
+                          code.startsWith('INVALID_') ||
+                          [
+                            'IMPORT_LIMIT',
+                            'IMPORTS_NOT_SUPPORTED',
+                            'PLUGIN_NOT_FOUND',
+                            'UNKNOWN_PLUGIN',
+                            'PLUGIN_CAPABILITY_MISMATCH',
+                            'CAPABILITY_OR_INSTANCE_MISMATCH',
+                            'CAPABILITY_MISSING',
+                            'PLUGIN_UNAVAILABLE',
+                            'CONNECTION_TEST_UNSUPPORTED',
+                          ].includes(code)
+                        ? 400
+                        : 500;
     void reply.code(status).send({
       error: {
         code,
         message:
           code === 'INTERNAL_ERROR' ? 'Request could not be completed' : code,
-        correlationId: randomUUID(),
+        correlationId: request.id,
       },
     });
   });
+  app.get('/api/openapi.json', () => QueryOpenApi);
   app.get('/api/health', () => ({ status: 'ok', schemaVersion: 1 }));
+  app.get('/api/readiness', (request, reply) => {
+    authorize(authenticate(request), undefined, true);
+    const result = inspectStorage(options.dataRoot, catalog.db);
+    if (!auditStatus().ok) result.ready = false;
+    if (coordinator.lastIndexError) {
+      result.checks.index = { ok: false, code: 'INDEX_REBUILD_FAILED' };
+      result.ready = false;
+    }
+    if (coordinator.lastWorkerError) result.ready = false;
+    reply.code(result.ready ? 200 : 503);
+    return parseReadinessReport({
+      ...result,
+      audit: auditStatus(),
+      requestId: request.id,
+      scheduler: {
+        ok: coordinator.lastWorkerError === null,
+        code: coordinator.lastWorkerError ? 'SCHEDULER_FAILED' : 'OK',
+      },
+    });
+  });
   app.post<{ Body: { token: string } }>(
     '/api/session',
     { schema: { body: LoginSchema } },
@@ -324,32 +564,44 @@ export function createApplication(options: ApplicationOptions) {
         options.ownerToken,
       );
       if (!principal) throw new Error('UNAUTHORIZED');
+      requestPrincipals.set(request, principal);
       reply.header(
         'Set-Cookie',
         'oc_session=' +
           encodeURIComponent(request.body.token) +
-          '; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800',
+          '; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800' +
+          (publicOrigin ? '; Secure' : ''),
       );
       return principal;
     },
   );
   app.get('/api/session', (request) => authenticate(request));
-  app.delete('/api/session', (_request, reply) => {
+  app.delete('/api/session', (request, reply) => {
+    const principal = catalog.authenticate(
+      credential(request),
+      options.ownerToken,
+    );
+    if (principal) requestPrincipals.set(request, principal);
     reply.header(
       'Set-Cookie',
-      'oc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0',
+      'oc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' +
+        (publicOrigin ? '; Secure' : ''),
     );
     return { ok: true };
   });
-  app.get('/api/projects', (request) =>
+  app.get(QueryRoutes.projects, (request) =>
     services.projects(authenticate(request)),
   );
   app.post<{ Body: { name: string } }>(
-    '/api/projects',
+    QueryRoutes.projects,
     { schema: { body: CreateProjectSchema } },
     (request) => {
       authorize(authenticate(request), undefined, true);
-      return catalog.createProject(request.body.name);
+      const project = critical(request, (context) =>
+        catalog.createProject(request.body.name, context),
+      );
+      requestTargets.set(request, { projectId: project.id });
+      return project;
     },
   );
   type ProjectParams = { id: string };
@@ -394,11 +646,19 @@ export function createApplication(options: ApplicationOptions) {
         'processor',
         context,
       );
-      return catalog.createBinding(request.params.id, {
-        name: selection.name,
-        connector,
-        processor,
-      });
+      const created = critical(request, (context) =>
+        catalog.createBinding(
+          request.params.id,
+          {
+            name: selection.name,
+            connector,
+            processor,
+          },
+          context,
+        ),
+      );
+      requestTargets.set(request, { bindingId: created.id });
+      return created;
     },
   );
   function bindingGate(request: FastifyRequest<{ Params: BindingParams }>) {
@@ -420,13 +680,34 @@ export function createApplication(options: ApplicationOptions) {
       const binding = bindingGate(request);
       if (!binding.active) throw new Error('BINDING_REVOKED');
       if (!binding.connector) throw new Error('CONNECTION_TEST_UNSUPPORTED');
-      const result = await registry.testConnection(
+      if (connectionTests >= 4) throw new Error('RESOURCE_BUSY');
+      connectionTests++;
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const operation = registry.testConnection(
         binding.connector,
-        AbortSignal.timeout(15_000),
+        controller.signal,
       );
-      const current = bindingGate(request);
-      if (!current.active) throw new Error('BINDING_REVOKED');
-      return result;
+      // A native plugin that ignores cancellation keeps its slot until settlement.
+      // This bounds continuing work even after the HTTP deadline has elapsed.
+      void operation.then(
+        () => connectionTests--,
+        () => connectionTests--,
+      );
+      try {
+        const deadline = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('CONNECTION_TEST_TIMEOUT'));
+            controller.abort();
+          }, connectionTestTimeoutMs);
+        });
+        const result = await Promise.race([operation, deadline]);
+        const current = bindingGate(request);
+        if (!current.active) throw new Error('BINDING_REVOKED');
+        return result;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     },
   );
   app.post<{ Params: BindingParams; Body: ImportUploadInput }>(
@@ -450,36 +731,39 @@ export function createApplication(options: ApplicationOptions) {
       try {
         await registry.validateImport(binding.connector, request.body.content);
       } catch (error) {
-        const code =
-          error instanceof Error
-            ? /^[A-Z][A-Z0-9_]+(?::|$)/
-                .exec(error.message)?.[0]
-                .replace(/:$/, '')
-            : undefined;
+        const code = safeErrorCode(error, 'INVALID_IMPORT');
         // Do not retain arbitrary native-plugin diagnostics containing imported
         // text or credentials in the HTTP error chain; expose only a stable code.
         // eslint-disable-next-line preserve-caught-error
-        throw new Error(code ?? 'INVALID_IMPORT');
+        throw new Error(code);
       }
       bindingGate(request);
       if (!catalog.getBinding(binding.id)?.active)
         throw new Error('BINDING_REVOKED');
       const object = store.putText(request.body.content);
-      return catalog.putImport(
-        binding.id,
-        {
-          id: randomUUID(),
-          filename: request.body.filename,
-          ...object,
-        },
-        request.body.expectedObjectId ?? null,
+      const imported = critical(request, (context) =>
+        catalog.putImport(
+          binding.id,
+          {
+            id: randomUUID(),
+            filename: request.body.filename,
+            ...object,
+          },
+          request.body.expectedObjectId ?? null,
+          context,
+        ),
       );
+      requestTargets.set(request, { objectId: imported.id });
+      return imported;
     },
   );
   app.delete<{ Params: BindingParams & { objectId: string } }>(
     '/api/projects/:id/bindings/:bindingId/imports/:objectId',
     (request) => {
-      catalog.removeImport(bindingGate(request).id, request.params.objectId);
+      const binding = bindingGate(request);
+      critical(request, (context) =>
+        catalog.removeImport(binding.id, request.params.objectId, context),
+      );
       return { ok: true };
     },
   );
@@ -491,7 +775,10 @@ export function createApplication(options: ApplicationOptions) {
       '/api/projects/:id/bindings/:bindingId/' + action,
       (request, reply) => {
         const binding = bindingGate(request);
-        const run = catalog.enqueue(binding.id, kind);
+        const run = critical(request, (context) =>
+          catalog.enqueue(binding.id, kind, context),
+        );
+        requestJobs.set(request, run.id);
         reply.code(202);
         return run;
       },
@@ -500,7 +787,10 @@ export function createApplication(options: ApplicationOptions) {
   app.delete<{ Params: BindingParams }>(
     '/api/projects/:id/bindings/:bindingId',
     (request) => {
-      catalog.revokeBinding(bindingGate(request).id);
+      const binding = bindingGate(request);
+      critical(request, (context) =>
+        catalog.revokeBinding(binding.id, context),
+      );
       return { ok: true };
     },
   );
@@ -515,11 +805,11 @@ export function createApplication(options: ApplicationOptions) {
           catalog.getBinding(run.bindingId)?.active,
       );
   });
-  app.get<{ Params: ProjectParams }>('/api/projects/:id/tree', (request) =>
+  app.get<{ Params: ProjectParams }>(QueryRoutes.tree, (request) =>
     services.tree(authenticate(request), request.params.id),
   );
   app.post<{ Params: ProjectParams; Body: SearchInput }>(
-    '/api/projects/:id/search',
+    QueryRoutes.search,
     { schema: { body: SearchSchema } },
     (request) =>
       services.search(authenticate(request), request.params.id, request.body),
@@ -527,27 +817,101 @@ export function createApplication(options: ApplicationOptions) {
   app.get<{
     Params: ProjectParams;
     Querystring: { fileId: string; revisionId: string };
-  }>(
-    '/api/projects/:id/read',
-    { schema: { querystring: ReadSchema } },
-    (request) =>
-      services.read(
-        authenticate(request),
-        request.params.id,
-        request.query.fileId,
-        request.query.revisionId,
-      ),
+  }>(QueryRoutes.read, { schema: { querystring: ReadSchema } }, (request) =>
+    services.read(
+      authenticate(request),
+      request.params.id,
+      request.query.fileId,
+      request.query.revisionId,
+    ),
   );
   app.post<{ Params: ProjectParams }>('/api/projects/:id/tokens', (request) => {
     authorize(authenticate(request), request.params.id, true);
-    return catalog.createReaderToken(request.params.id);
+    const created = critical(request, (context) =>
+      catalog.createReaderToken(request.params.id, context),
+    );
+    requestTargets.set(request, { tokenId: created.id });
+    return created;
   });
   app.delete<{ Params: { tokenId: string } }>(
     '/api/tokens/:tokenId',
     (request) => {
       authorize(authenticate(request), undefined, true);
-      catalog.revokeToken(request.params.tokenId);
+      critical(request, (context) =>
+        catalog.revokeToken(request.params.tokenId, context),
+      );
       return { ok: true };
+    },
+  );
+  app.get<{ Querystring: { after?: string; limit?: string; until?: string } }>(
+    '/api/audit',
+    {
+      schema: {
+        querystring: Type.Object(
+          {
+            after: Type.Optional(Type.String({ pattern: '^[0-9]{1,16}$' })),
+            until: Type.Optional(Type.String({ pattern: '^[0-9]{1,16}$' })),
+            limit: Type.Optional(Type.String({ pattern: '^[0-9]{1,4}$' })),
+          },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    (request) => {
+      authorize(authenticate(request), undefined, true);
+      auditDispatcher.flush();
+      return catalog.auditEvents(
+        Number(request.query.after ?? 0),
+        Number(request.query.limit ?? 100),
+        request.query.until === undefined
+          ? undefined
+          : Number(request.query.until),
+      );
+    },
+  );
+  app.get<{ Querystring: { limit?: string } }>(
+    '/api/audit/pending',
+    {
+      schema: {
+        querystring: Type.Object(
+          { limit: Type.Optional(Type.String({ pattern: '^[0-9]{1,3}$' })) },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    (request) => {
+      authorize(authenticate(request), undefined, true);
+      return {
+        events: catalog.pendingAuditEvents(Number(request.query.limit ?? 100)),
+        audit: auditStatus(),
+      };
+    },
+  );
+  app.post<{ Body: { acknowledgeReadGap?: boolean } }>(
+    '/api/audit/retry',
+    {
+      schema: {
+        body: Type.Object(
+          { acknowledgeReadGap: Type.Optional(Type.Boolean()) },
+          { additionalProperties: false },
+        ),
+      },
+    },
+    (request, reply) => {
+      authorize(authenticate(request), undefined, true);
+      const delivered = auditDispatcher.retry();
+      if (request.body.acknowledgeReadGap && auditDispatcher.status().ok) {
+        try {
+          catalog.setAuditReadGap(false);
+          auditFailure = false;
+        } catch {
+          markReadGap();
+        }
+      }
+      const status = auditStatus();
+      if (!status.ok) requestCodes.set(request, status.code);
+      reply.code(status.ok ? 200 : 503);
+      return { audit: status, delivered, budget: 100 };
     },
   );
   registerMcp(app, services);
@@ -583,12 +947,16 @@ export function createApplication(options: ApplicationOptions) {
     return reply
       .type(types[extname(path)] ?? 'application/octet-stream')
       .header('X-Content-Type-Options', 'nosniff')
-      .send(readFileSync(path));
+      .send(readStaticAsset(webRoot, path));
   });
   app.addHook('onClose', async () => {
     await coordinator.stop();
+    auditDispatcher.stop();
     catalog.close();
   });
-  if (options.autoStart !== false) coordinator.start();
-  return { app, catalog, store, coordinator, services };
+  if (options.autoStart !== false) {
+    auditDispatcher.start();
+    coordinator.start();
+  }
+  return { app, catalog, store, coordinator, services, auditDispatcher };
 }

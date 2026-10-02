@@ -157,3 +157,27 @@ it('accepts the maximum owner length through the same Web login boundary', async
   expect(response.statusCode).toBe(200);
   expect(response.headers['set-cookie']).toBeDefined();
 });
+
+it('invalid port and credential-bearing proxy origin fail without creating private data or echoing configuration', async () => {
+  for (const configuration of [
+    { PORT: 'not-a-port' },
+    {
+      NODE_ENV: 'production',
+      OPENCONTEXT_TEST_REPO_ROOT: '/synthetic-only-test-root',
+    },
+    {
+      OPENCONTEXT_PUBLIC_ORIGIN:
+        'https://user:PRIVATE_ORIGIN_SECRET@context.example.invalid',
+    },
+  ]) {
+    const root = tempRoot();
+    const app = launch(root, false, {
+      OPENCONTEXT_OWNER_TOKEN: owner,
+      ...configuration,
+    });
+    expect(await app.started).toBe(1);
+    expect(app.output).not.toContain(root);
+    expect(app.output).not.toContain('PRIVATE_ORIGIN_SECRET');
+    expect(existsSync(resolve(root, 'runtime'))).toBe(false);
+  }
+});
