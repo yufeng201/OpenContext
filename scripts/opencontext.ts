@@ -1,8 +1,8 @@
-import { safeErrorCode } from '../packages/contracts/src/errors.ts';
 import {
-  OpenContextClient,
-  OpenContextError,
-} from '../packages/http-client/src/index.ts';
+  safeErrorCode,
+  safeErrorMetadata,
+} from '../packages/contracts/src/errors.ts';
+import { OpenContextClient } from '../packages/http-client/src/index.ts';
 
 async function main(): Promise<void> {
   const controller = new AbortController();
@@ -69,12 +69,11 @@ try {
   await main();
 } catch (error) {
   const code = safeErrorCode(error, 'REQUEST_FAILED');
+  const metadata = safeErrorMetadata(error);
   console.error(
     JSON.stringify({
       error: code,
-      ...(error instanceof OpenContextError
-        ? { status: error.status, correlationId: error.correlationId }
-        : {}),
+      ...metadata,
     }),
   );
   process.exitCode = 1;

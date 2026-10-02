@@ -214,6 +214,18 @@ export const PluginManifestSchema = Type.Object(
   { additionalProperties: false },
 );
 export type PluginManifest = Static<typeof PluginManifestSchema>;
+export const PluginProbeSchema = Type.Object(
+  {
+    available: Type.Boolean(),
+    capabilities: Type.Array(
+      PluginManifestSchema.properties.capabilities.items,
+      { maxItems: 8, uniqueItems: true },
+    ),
+    limitations: Type.Array(Type.String({ maxLength: 1000 }), { maxItems: 20 }),
+  },
+  { additionalProperties: false },
+);
+export type PluginProbeResult = Static<typeof PluginProbeSchema>;
 
 export type PluginInstance = {
   ref: string;

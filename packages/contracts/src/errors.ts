@@ -200,14 +200,55 @@ const codes = new Set([
   'UPSTREAM_REJECTED',
   'UPSTREAM_UNAVAILABLE',
 ]);
+/** Never invoke native getters, inspect prototypes, coerce values or serialize an external error. */
+function ownErrorValue(error: unknown, field: string): unknown {
+  if (typeof error !== 'object' || error === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, field);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+export function isErrorCode(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 80 && codes.has(value);
+}
 export function safeErrorCode(
   error: unknown,
   fallback = 'INTERNAL_ERROR',
 ): string {
-  const message = error instanceof Error ? error.message : '';
-  const candidate = /^([A-Z][A-Z0-9_]+)(?::|$)/.exec(message)?.[1];
-  return candidate && codes.has(candidate) ? candidate : fallback;
+  const code = ownErrorValue(error, 'code');
+  if (isErrorCode(code)) return code;
+  const message = ownErrorValue(error, 'message');
+  const candidate =
+    typeof message === 'string'
+      ? /^([A-Z][A-Z0-9_]{0,79})(?::|$)/.exec(message.slice(0, 81))?.[1]
+      : undefined;
+  return isErrorCode(candidate)
+    ? candidate
+    : isErrorCode(fallback)
+      ? fallback
+      : 'INTERNAL_ERROR';
 }
-export function isErrorCode(value: unknown): value is string {
-  return typeof value === 'string' && codes.has(value);
+/** Only bounded, own data fields may accompany a stable code across an error boundary. */
+export function safeErrorMetadata(error: unknown): {
+  status?: number;
+  correlationId?: string;
+} {
+  const status = ownErrorValue(error, 'status');
+  const correlationId = ownErrorValue(error, 'correlationId');
+  return {
+    ...(typeof status === 'number' &&
+    Number.isInteger(status) &&
+    (status === 0 || (status >= 100 && status <= 599))
+      ? { status }
+      : {}),
+    ...(typeof correlationId === 'string' &&
+    correlationId.length === 36 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      correlationId,
+    )
+      ? { correlationId }
+      : {}),
+  };
 }

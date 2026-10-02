@@ -118,3 +118,5 @@ host 向 hook 传入自己的 `AbortSignal`，同时传播调用方取消；HTTP
 网络适配器在组合层注入fetch和严格按群/区域授权的凭据解析器。客户端配置只保存secretRef，不能注入URL、fetch或明文token。飞书持久snapshot由`previousVersion`选择，pending仅为分页暂存；不是另一个可决定正式head的主库，但已确认snapshot是恢复必需文件，必须备份。完整分页后才返回full集合，不把丢页/权限错误/列表缺失推断为删除。模拟测试通过不代表真实来源授权或生产验收。团队多用户模型仍未明确。
 
 真实 Session 采集也分两步：在用户指定项目和历史范围内，通过经过版本探测的厂商读取接口生成完整 envelope；然后复用已实现的导入与发布门禁。采集器需要单独的设备授权、源读取/游标恢复和卸载配置回滚，不把当前 Web 上传当成自动采集已完成。候选的真实本地 Agent/provider 提取实现可接现有 async `CandidateExtractor`，但必须另验证认证、预算、取消和结构化输出；当前只注册确定性实现。团队含义确认后再设计身份、成员权限与协作模型。
+
+probe 使用共享 `PluginProbeSchema`。host在稳定封装内读取并复制 available、最多8个能力和最多20条/每条1000字符limitations，验证后序列化为普通数据；不使用native iterator/toJSON或继续传递带accessor的返回对象。返回值getter/proxy、构造和descriptor消费异常均不透传原Error；受审稳定code保留。错误分类只检查自有data字段的有限白名单前缀，不触发message/code getter、prototype检查或原异常序列化，不复制cause/details/原始stack。可执行相邻回归见 `packages/plugin-host/tests/probe-projection.test.ts` 与 `tests/integration/error-projection.test.ts`。

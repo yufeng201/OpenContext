@@ -1,5 +1,6 @@
 import type {
   Capability,
+  PluginProbeResult,
   PluginManifest,
   PluginInstance,
   PluginField,
@@ -23,11 +24,7 @@ export type ExecutionContext = {
 };
 export interface OfficialPlugin<I, O> {
   manifest: PluginManifest;
-  probe(): {
-    available: boolean;
-    capabilities: Capability[];
-    limitations: string[];
-  };
+  probe(): PluginProbeResult;
   invoke(input: I, context: ExecutionContext): Promise<O>;
 }
 
@@ -45,11 +42,7 @@ type DefinitionMetadata = {
   fields: PluginField[];
   acceptsImports: boolean;
   recommendedProcessorRef?: string;
-  probe(): {
-    available: boolean;
-    capabilities: Capability[];
-    limitations: string[];
-  };
+  probe(): PluginProbeResult;
   validateConfig?(
     config: Record<string, unknown>,
     context: ConfigurationContext,

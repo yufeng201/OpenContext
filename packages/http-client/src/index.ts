@@ -1,6 +1,10 @@
 import { performance } from 'node:perf_hooks';
 import { setImmediate as yieldEventLoop } from 'node:timers/promises';
-import { isErrorCode } from '@opencontext/contracts/errors';
+import {
+  isErrorCode,
+  safeErrorCode,
+  safeErrorMetadata,
+} from '@opencontext/contracts/errors';
 import { createHash } from 'node:crypto';
 import { Value } from '@sinclair/typebox/value';
 import type { TSchema } from '@sinclair/typebox';
@@ -40,12 +44,27 @@ export class OpenContextError extends Error {
   readonly code: string;
   readonly correlationId: string | undefined;
   constructor(status: number, code: string, correlationId?: string) {
-    super(code);
+    const stableCode = isErrorCode(code) ? code : 'REQUEST_FAILED';
+    super(stableCode);
+    const metadata = safeErrorMetadata({ status, correlationId });
     this.name = 'OpenContextError';
-    this.status = status;
-    this.code = code;
-    this.correlationId = correlationId;
+    this.status = metadata.status ?? 0;
+    this.code = stableCode;
+    this.correlationId = metadata.correlationId;
   }
+}
+/** Create a fresh closed error; foreign subclasses, getters, stacks and causes are never retained. */
+export function normalizeOpenContextError(
+  error: unknown,
+  fallback = 'REQUEST_FAILED',
+  defaultStatus = 0,
+): OpenContextError {
+  const metadata = safeErrorMetadata(error);
+  return new OpenContextError(
+    metadata.status ?? defaultStatus,
+    safeErrorCode(error, fallback),
+    metadata.correlationId,
+  );
 }
 export type QueryRequestOptions = { signal?: AbortSignal };
 /** Node24 source-only readonly preview SDK; no retries, persistence or mutation. */
@@ -62,50 +81,54 @@ export class OpenContextClient {
     timeoutMs?: number;
     maxResponseBytes?: number;
   }) {
-    let url: URL;
     try {
-      url = new URL(options.baseUrl);
-    } catch {
-      throw new Error('INVALID_SERVER_URL');
+      let url: URL;
+      try {
+        url = new URL(options.baseUrl);
+      } catch {
+        throw new Error('INVALID_SERVER_URL');
+      }
+      if (
+        !['http:', 'https:'].includes(url.protocol) ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash ||
+        url.pathname !== '/'
+      )
+        throw new Error('INVALID_SERVER_URL');
+      if (
+        url.protocol === 'http:' &&
+        !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+      )
+        throw new Error('PLAINTEXT_REMOTE_URL');
+      if (
+        typeof options.token !== 'string' ||
+        options.token.length < 16 ||
+        options.token.length > 256 ||
+        !/^[!-~]+$/.test(options.token)
+      )
+        throw new Error('INVALID_TOKEN');
+      this.timeoutMs = options.timeoutMs ?? 15000;
+      if (
+        !Number.isInteger(this.timeoutMs) ||
+        this.timeoutMs < 10 ||
+        this.timeoutMs > 15000
+      )
+        throw new Error('INVALID_TIMEOUT');
+      this.maximum = options.maxResponseBytes ?? QUERY_RESPONSE_MAX_BYTES;
+      if (
+        !Number.isInteger(this.maximum) ||
+        this.maximum < 128 ||
+        this.maximum > QUERY_RESPONSE_MAX_BYTES
+      )
+        throw new Error('INVALID_RESPONSE_LIMIT');
+      this.base = url.origin;
+      this.token = options.token;
+      this.transport = options.fetch ?? fetch;
+    } catch (error) {
+      throw normalizeOpenContextError(error);
     }
-    if (
-      !['http:', 'https:'].includes(url.protocol) ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash ||
-      url.pathname !== '/'
-    )
-      throw new Error('INVALID_SERVER_URL');
-    if (
-      url.protocol === 'http:' &&
-      !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
-    )
-      throw new Error('PLAINTEXT_REMOTE_URL');
-    if (
-      typeof options.token !== 'string' ||
-      options.token.length < 16 ||
-      options.token.length > 256 ||
-      !/^[!-~]+$/.test(options.token)
-    )
-      throw new Error('INVALID_TOKEN');
-    this.timeoutMs = options.timeoutMs ?? 15000;
-    if (
-      !Number.isInteger(this.timeoutMs) ||
-      this.timeoutMs < 10 ||
-      this.timeoutMs > 15000
-    )
-      throw new Error('INVALID_TIMEOUT');
-    this.maximum = options.maxResponseBytes ?? QUERY_RESPONSE_MAX_BYTES;
-    if (
-      !Number.isInteger(this.maximum) ||
-      this.maximum < 128 ||
-      this.maximum > QUERY_RESPONSE_MAX_BYTES
-    )
-      throw new Error('INVALID_RESPONSE_LIMIT');
-    this.base = url.origin;
-    this.token = options.token;
-    this.transport = options.fetch ?? fetch;
   }
   private async request<T>(
     path: string,
@@ -292,25 +315,26 @@ export class OpenContextClient {
         check();
         if (errorStatus)
           throw new OpenContextError(response.status, 'HTTP_ERROR');
-        if (error instanceof OpenContextError && isErrorCode(error.code))
-          throw error;
-        throw new OpenContextError(response.status, 'INVALID_RESPONSE');
+        throw normalizeOpenContextError(
+          error,
+          'INVALID_RESPONSE',
+          response.status,
+        );
       }
       if (errorStatus) {
+        let parsed: ReturnType<typeof parseQueryError>;
         try {
-          const parsed = parseQueryError(data);
+          parsed = parseQueryError(data);
+        } catch {
           check();
-          throw new OpenContextError(
-            response.status,
-            parsed.error.code,
-            parsed.error.correlationId,
-          );
-        } catch (error) {
-          check();
-          if (error instanceof OpenContextError && isErrorCode(error.code))
-            throw error;
           throw new OpenContextError(response.status, 'HTTP_ERROR');
         }
+        check();
+        throw new OpenContextError(
+          response.status,
+          parsed.error.code,
+          parsed.error.correlationId,
+        );
       }
       if (response.status !== 200 && response.status !== diagnosticStatus)
         throw new OpenContextError(response.status, 'INVALID_RESPONSE');
@@ -333,18 +357,18 @@ export class OpenContextClient {
         }
       } catch (error) {
         check();
-        if (error instanceof OpenContextError && isErrorCode(error.code))
-          throw error;
-        throw new OpenContextError(response.status, 'INVALID_RESPONSE');
+        throw normalizeOpenContextError(
+          error,
+          'INVALID_RESPONSE',
+          response.status,
+        );
       }
       check();
       complete = true;
       return result;
     } catch (error) {
       check();
-      if (error instanceof OpenContextError && isErrorCode(error.code))
-        throw error;
-      throw new OpenContextError(0, 'REQUEST_FAILED');
+      throw normalizeOpenContextError(error);
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', cancel);
@@ -376,14 +400,14 @@ export class OpenContextClient {
       );
       return result as ReadinessReport;
     } catch (error) {
+      const projected = normalizeOpenContextError(error);
       if (
-        error instanceof OpenContextError &&
         ['INVALID_RESPONSE', 'INVALID_RESPONSE_CONTENT_TYPE'].includes(
-          error.code,
+          projected.code,
         )
       )
         throw new OpenContextError(502, 'INVALID_READINESS_RESPONSE');
-      throw error;
+      throw projected;
     }
   }
 
