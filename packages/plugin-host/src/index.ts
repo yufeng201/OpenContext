@@ -1,10 +1,11 @@
-import { isErrorCode } from '@opencontext/contracts/errors';
+import { isErrorCode, safeErrorCode } from '@opencontext/contracts/errors';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { Type } from '@sinclair/typebox';
+import { Type, TypeGuard } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import {
   ConnectionTestResultSchema,
+  PluginManifestSchema,
   type ConnectionTestResult,
 } from '@opencontext/contracts';
 import type {
@@ -215,10 +216,30 @@ export class StaticRegistry {
     string,
     { definition: PluginDefinition; digest: string }
   >();
-  constructor(definitions: readonly PluginDefinition[]) {
+  private readonly timeoutMs: number;
+  private readonly maxConcurrent: number;
+  private active = 0;
+  constructor(
+    definitions: readonly PluginDefinition[],
+    options: { timeoutMs?: number; maxConcurrent?: number } = {},
+  ) {
+    this.timeoutMs = options.timeoutMs ?? 30000;
+    this.maxConcurrent = options.maxConcurrent ?? 4;
+    if (
+      !Number.isInteger(this.timeoutMs) ||
+      this.timeoutMs < 10 ||
+      this.timeoutMs > 30000 ||
+      !Number.isInteger(this.maxConcurrent) ||
+      this.maxConcurrent < 1 ||
+      this.maxConcurrent > 16
+    )
+      fail('INVALID_PLUGIN_LIMIT');
     for (const definition of definitions) {
       const { manifest } = definition;
       if (
+        !Value.Check(PluginManifestSchema, manifest) ||
+        !TypeGuard.IsSchema(definition.configSchema) ||
+        definition.configSchema.type !== 'object' ||
         manifest.protocolVersion !== '1' ||
         manifest.location !== 'server' ||
         manifest.trust !== 'official-trusted-native' ||
@@ -282,7 +303,16 @@ export class StaticRegistry {
     context: ConfigurationContext = {},
   ): Promise<PluginInstanceLock> {
     const lock = this.prepareSync(selection, capability);
-    await this.resolve(lock, capability).validateConfig?.(lock.config, context);
+    if (context.signal?.aborted) fail('CANCELLED');
+    const definition = this.resolve(lock, capability);
+    if (definition.validateConfig)
+      await this.withDeadline(
+        (signal) =>
+          Promise.resolve(
+            definition.validateConfig!(lock.config, { ...context, signal }),
+          ),
+        context.signal,
+      );
     // Recheck after asynchronous validation; no mutations may drift the prepared lock.
     this.resolve(lock, capability);
     return lock;
@@ -290,13 +320,22 @@ export class StaticRegistry {
   async validateImport(
     lock: PluginInstanceLock,
     content: string,
+    context: { signal?: AbortSignal } = {},
   ): Promise<void> {
     const definition = this.resolve(lock, 'connector');
     if (!definition.acceptsImports) fail('PLUGIN_IMPORTS_UNSUPPORTED');
     const frozenConfig = freezeConfiguration(lock.config);
     // Plugin errors stay intact (e.g. SECRET_DETECTED). The caller must not persist
     // the bytes until this preflight succeeds; absent hooks are not secret scans.
-    await definition.validateImport?.(content, frozenConfig);
+    if (context.signal?.aborted) fail('CANCELLED');
+    if (definition.validateImport)
+      await this.withDeadline(
+        (signal) =>
+          Promise.resolve(
+            definition.validateImport!(content, frozenConfig, { signal }),
+          ),
+        context.signal,
+      );
     this.resolve(lock, 'connector');
   }
   async testConnection(
@@ -306,10 +345,21 @@ export class StaticRegistry {
     if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
     const definition = this.resolve(lock, 'connector');
     if (!definition.testConnection) fail('CONNECTION_TEST_UNSUPPORTED');
-    const result: unknown = await definition.testConnection(
-      freezeConfiguration(lock.config),
-      { signal },
-    );
+    let result: unknown;
+    try {
+      result = await this.withDeadline(
+        (bound) =>
+          definition.testConnection!(freezeConfiguration(lock.config), {
+            signal: bound,
+          }),
+        signal,
+      );
+    } catch (error) {
+      const code = safeErrorCode(error);
+      if (code === 'CANCELLED') fail('CONNECTION_TEST_CANCELLED');
+      if (code === 'PLUGIN_TIMEOUT') fail('CONNECTION_TEST_TIMEOUT');
+      throw error;
+    }
     if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
     this.resolve(lock, 'connector');
     if (
@@ -367,29 +417,33 @@ export class StaticRegistry {
       fail('PLUGIN_IMPORTS_UNSUPPORTED');
     const refs = new Map(input.imports.map((ref) => [ref.id, ref]));
     if (refs.size !== input.imports.length) fail('INVALID_PLUGIN_INPUT');
-    const guardedContext: ExecutionContext = {
-      ...context,
-      instanceRef: lock.ref,
-    };
-    if (context.readImport)
-      guardedContext.readImport = async (ref: ImportedObjectRef) => {
-        assertNotCancelled(context);
-        const locked = refs.get(ref.id);
-        if (!locked || canonical(locked) !== canonical(ref))
-          fail('IMPORT_ACCESS_DENIED');
-        const text = await context.readImport!(structuredClone(locked));
-        if (
-          Buffer.byteLength(text) !== locked.bytes ||
-          hash(text) !== locked.contentHash
-        )
-          fail('IMPORT_HASH_MISMATCH');
-        return text;
+    const output: unknown = await this.withDeadline((signal) => {
+      const guardedContext: ExecutionContext = {
+        ...context,
+        instanceRef: lock.ref,
+        signal,
       };
-    assertNotCancelled(context);
-    const output: unknown = await definition.invoke(
-      structuredClone({ ...input, config: lock.config }),
-      guardedContext,
-    );
+      if (context.readImport)
+        guardedContext.readImport = async (ref: ImportedObjectRef) => {
+          assertNotCancelled(guardedContext);
+          const locked = refs.get(ref.id);
+          if (!locked || canonical(locked) !== canonical(ref))
+            fail('IMPORT_ACCESS_DENIED');
+          const text = await context.readImport!(structuredClone(locked));
+          assertNotCancelled(guardedContext);
+          if (
+            Buffer.byteLength(text) !== locked.bytes ||
+            hash(text) !== locked.contentHash
+          )
+            fail('IMPORT_HASH_MISMATCH');
+          return text;
+        };
+      assertNotCancelled(guardedContext);
+      return definition.invoke(
+        structuredClone({ ...input, config: lock.config }),
+        guardedContext,
+      );
+    }, context.signal);
     assertNotCancelled(context);
     if (!Value.Check(connectorOutput, output)) fail('INVALID_PLUGIN_OUTPUT');
     checkFiles(output.files, input.maxFiles, input.maxBytes);
@@ -413,9 +467,14 @@ export class StaticRegistry {
       input.files.map(({ file }) => `${file.fileId}\n${file.revisionId}`),
     );
     assertNotCancelled(context);
-    const output: unknown = await definition.invoke(
-      structuredClone({ ...input, config: lock.config }),
-      context,
+    const output: unknown = await this.withDeadline(
+      (signal) =>
+        definition.invoke(structuredClone({ ...input, config: lock.config }), {
+          ...context,
+          signal,
+          instanceRef: lock.ref,
+        }),
+      context.signal,
     );
     assertNotCancelled(context);
     if (!Value.Check(processorOutput, output)) fail('INVALID_PLUGIN_OUTPUT');
@@ -433,6 +492,50 @@ export class StaticRegistry {
       slots.add(file.slotKey);
     }
     return output;
+  }
+  operationCounts() {
+    return { active: this.active, maxConcurrent: this.maxConcurrent };
+  }
+  /** Deadline bounds waiting; continuing trusted-native work retains its quota. */
+  private async withDeadline<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    external?: AbortSignal,
+  ): Promise<T> {
+    if (external?.aborted) fail('CANCELLED');
+    if (this.active >= this.maxConcurrent) fail('RESOURCE_BUSY');
+    const controller = new AbortController(),
+      forward = () => controller.abort('CANCELLED');
+    external?.addEventListener('abort', forward, { once: true });
+    const timer = setTimeout(
+      () => controller.abort('PLUGIN_TIMEOUT'),
+      this.timeoutMs,
+    );
+    this.active++;
+    const running = Promise.resolve().then(() => {
+      if (controller.signal.aborted) fail('CANCELLED');
+      return operation(controller.signal);
+    });
+    void running.then(
+      () => this.active--,
+      () => this.active--,
+    );
+    let stop: () => void = () => {};
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        stop = () =>
+          reject(new PluginHostError(String(controller.signal.reason)));
+        controller.signal.addEventListener('abort', stop, { once: true });
+        running.then(resolve, (error) =>
+          reject(
+            new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED')),
+          ),
+        );
+      });
+    } finally {
+      clearTimeout(timer);
+      external?.removeEventListener('abort', forward);
+      controller.signal.removeEventListener('abort', stop);
+    }
   }
   private entry(
     packageRef: string,
@@ -454,8 +557,12 @@ export class StaticRegistry {
     config: Record<string, unknown>,
   ): string {
     const configurationHash = configHash(config);
-    if (!Value.Check(definition.configSchema, config))
+    try {
+      if (!Value.Check(definition.configSchema, config))
+        fail('INVALID_PLUGIN_CONFIG');
+    } catch {
       fail('INVALID_PLUGIN_CONFIG');
+    }
     return configurationHash;
   }
 }

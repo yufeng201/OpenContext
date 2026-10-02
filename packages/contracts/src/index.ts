@@ -183,14 +183,38 @@ export type Capability =
   | 'context-assembler'
   | 'embedding'
   | 'publisher';
-export type PluginManifest = {
-  id: string;
-  version: string;
-  protocolVersion: '1';
-  capabilities: Capability[];
-  location: 'server';
-  trust: 'official-trusted-native';
-};
+export const PluginManifestSchema = Type.Object(
+  {
+    id: Type.String({
+      pattern: '^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$',
+      maxLength: 160,
+    }),
+    version: Type.String({
+      pattern:
+        '^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$',
+      maxLength: 80,
+    }),
+    protocolVersion: Type.Literal('1'),
+    capabilities: Type.Array(
+      Type.Union([
+        Type.Literal('connector'),
+        Type.Literal('trigger'),
+        Type.Literal('processor'),
+        Type.Literal('indexer'),
+        Type.Literal('retriever'),
+        Type.Literal('context-assembler'),
+        Type.Literal('embedding'),
+        Type.Literal('publisher'),
+      ]),
+      { minItems: 1, maxItems: 8, uniqueItems: true },
+    ),
+    location: Type.Literal('server'),
+    trust: Type.Literal('official-trusted-native'),
+  },
+  { additionalProperties: false },
+);
+export type PluginManifest = Static<typeof PluginManifestSchema>;
+
 export type PluginInstance = {
   ref: string;
   packageRef: string;

@@ -20,19 +20,19 @@ Web 开发热更新为 `pnpm dev:web`（127.0.0.1:5173），API/MCP代理到4310
 
 ## 已实现边界
 
-| 模块        | 已有代码与行为                                                                                                                   |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| server/权限 | owner bearer或HttpOnly/SameSite cookie，项目只读token及撤销；API/MCP每次检查当前项目授权，source撤销传播衍生内容                 |
-| 文件        | SHA256 blob、不可变revision/commit清单；临时写→文件fsync→rename→父目录fsync后，SQLite短事务发布head、cursor、run与outbox         |
-| 调度        | SQLite持久队列、单worker轮询、租约/心跳、十进制fence、新server incarnation；重启恢复queued工作，旧attempt不得发布                |
-| 插件注册    | StaticRegistry统一发现、配置验证、package digest/config/instance锁；通用binding选择connector/processor，任务冻结锁与导入对象引用 |
-| Git插件     | 注册为ConnectorDefinition；固定SHA文本快照、重复幂等、rename稳定ID、增改删、强推/缺旧SHA对账、跳过报告                           |
-| Session插件 | Codex/Claude显式v1 envelope上传；预检后落盘，scope/ID/完整性校验；raw精确保留、文本归一化、已知工具项raw-only诊断                |
-| processor   | 注册为ProcessorDefinition；Markdown导航/摘录不调用模型；full集合提交、稳定slot、删除旧产物；不得覆盖human-owned                  |
-| Session候选 | 显式Memory/Rule/Experience及中文标记→确定性Markdown；message/raw双revision引用与依赖；不是语义总结或自动规则批准                 |
-| 检索        | SQLite FTS5 + 固定snapshot文本grep降级；原文/产物共同召回、freshness/current revision gate、固定引用；索引失败outbox保留重试     |
-| MCP         | 官方SDK stateless Streamable HTTP，/mcp提供context_search/context_read/context_tree；TypeBox参数校验，projectId必填              |
-| Web         | React/Vite/Tailwind/shadcn模式、Router/Query/RHF；登录/项目/来源/任务/搜索/固定引用；失权清缓存，无token本地持久化               |
+| 模块        | 已有代码与行为                                                                                                                                     |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| server/权限 | owner bearer或HttpOnly/SameSite cookie，项目只读token及撤销；API/MCP每次检查当前项目授权，source撤销传播衍生内容                                   |
+| 文件        | SHA256 blob、不可变revision/commit清单；临时写→文件fsync→rename→父目录fsync后，SQLite短事务发布head、cursor、run与outbox                           |
+| 调度        | SQLite持久队列、单worker轮询、租约/心跳、十进制fence、新server incarnation；重启恢复queued工作，旧attempt不得发布                                  |
+| 插件注册    | StaticRegistry统一发现、TypeBox manifest/配置验证、package digest/config/instance锁；有界生命周期与独立离线包conformance，任务冻结锁与导入对象引用 |
+| Git插件     | 注册为ConnectorDefinition；固定SHA文本快照、重复幂等、rename稳定ID、增改删、强推/缺旧SHA对账、跳过报告                                             |
+| Session插件 | Codex/Claude显式v1 envelope上传；预检后落盘，scope/ID/完整性校验；raw精确保留、文本归一化、已知工具项raw-only诊断                                  |
+| processor   | 注册为ProcessorDefinition；Markdown导航/摘录不调用模型；full集合提交、稳定slot、删除旧产物；不得覆盖human-owned                                    |
+| Session候选 | 显式Memory/Rule/Experience及中文标记→确定性Markdown；message/raw双revision引用与依赖；不是语义总结或自动规则批准                                   |
+| 检索        | SQLite FTS5 + 固定snapshot文本grep降级；原文/产物共同召回、freshness/current revision gate、固定引用；索引失败outbox保留重试                       |
+| MCP         | 官方SDK stateless Streamable HTTP，/mcp提供context_search/context_read/context_tree；TypeBox参数校验，projectId必填                                |
+| Web         | React/Vite/Tailwind/shadcn模式、Router/Query/RHF；登录/项目/来源/任务/搜索/固定引用；失权清缓存，无token本地持久化                                 |
 
 项目是本切片的权限和文件边界，Web 暂用“上下文空间”称呼；完整 Space 下多 project 层级还未实现。插件为静态注册的可信 native 代码；不支持安装任意第三方插件、隔离进程或动态更新。八类功能能力仍为平台目标，当前只有connector/processor可执行注册；其余内建能力和未实现能力见[插件开发](PLUGIN_DEVELOPMENT.md)。绑定配置只创建一次，没有在线编辑、配置迁移或热升级接口。
 

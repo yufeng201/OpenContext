@@ -26,7 +26,7 @@ import {
   EmptyQuerySchema,
   type FilePageInput,
 } from '@opencontext/contracts/query-api';
-import Fastify, { type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname } from 'node:path';
@@ -508,6 +508,7 @@ export function createApplication(options: ApplicationOptions) {
                   ? 429
                   : [
                         'CONNECTION_TEST_TIMEOUT',
+                        'PLUGIN_TIMEOUT',
                         'AUDIT_QUEUE_FULL',
                         'AUDIT_UNAVAILABLE',
                       ].includes(code)
@@ -641,6 +642,26 @@ export function createApplication(options: ApplicationOptions) {
       return project;
     },
   );
+  function requestCancellation(request: FastifyRequest, reply: FastifyReply) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => {
+      if (!reply.raw.writableFinished) abort();
+    };
+    request.raw.once('aborted', abort);
+    reply.raw.once('close', close);
+    if (request.raw.aborted || reply.raw.destroyed) abort();
+    return {
+      signal: controller.signal,
+      assertActive() {
+        if (controller.signal.aborted) throw new Error('CANCELLED');
+      },
+      dispose() {
+        request.raw.off('aborted', abort);
+        reply.raw.off('close', close);
+      },
+    };
+  }
   type ProjectParams = { id: string };
   type BindingParams = { id: string; bindingId: string };
   app.get('/api/plugins', (request) => {
@@ -667,35 +688,45 @@ export function createApplication(options: ApplicationOptions) {
         body: Type.Union([CreateBindingSchema, CreatePluginBindingSchema]),
       },
     },
-    async (request) => {
-      authorize(authenticate(request), request.params.id, true);
-      const selection = bindingSelection(request.body);
-      const context = options.allowedLocalRepoRoot
-        ? { allowedLocalRepoRoot: options.allowedLocalRepoRoot }
-        : {};
-      const connector = await registry.prepare(
-        selection.connector,
-        'connector',
-        context,
-      );
-      const processor = await registry.prepare(
-        selection.processor,
-        'processor',
-        context,
-      );
-      const created = critical(request, (context) =>
-        catalog.createBinding(
-          request.params.id,
-          {
-            name: selection.name,
-            connector,
-            processor,
-          },
+    async (request, reply) => {
+      const cancellation = requestCancellation(request, reply);
+      try {
+        authorize(authenticate(request), request.params.id, true);
+        const selection = bindingSelection(request.body);
+        const context = options.allowedLocalRepoRoot
+          ? {
+              allowedLocalRepoRoot: options.allowedLocalRepoRoot,
+              signal: cancellation.signal,
+            }
+          : { signal: cancellation.signal };
+        const connector = await registry.prepare(
+          selection.connector,
+          'connector',
           context,
-        ),
-      );
-      requestTargets.set(request, { bindingId: created.id });
-      return created;
+        );
+        const processor = await registry.prepare(
+          selection.processor,
+          'processor',
+          context,
+        );
+        cancellation.assertActive();
+        authorize(authenticate(request), request.params.id, true);
+        const created = critical(request, (context) =>
+          catalog.createBinding(
+            request.params.id,
+            {
+              name: selection.name,
+              connector,
+              processor,
+            },
+            context,
+          ),
+        );
+        requestTargets.set(request, { bindingId: created.id });
+        return created;
+      } finally {
+        cancellation.dispose();
+      }
     },
   );
   function bindingGate(request: FastifyRequest<{ Params: BindingParams }>) {
@@ -750,48 +781,58 @@ export function createApplication(options: ApplicationOptions) {
   app.post<{ Params: BindingParams; Body: ImportUploadInput }>(
     '/api/projects/:id/bindings/:bindingId/imports',
     { bodyLimit: 2_105_344, schema: { body: ImportUploadSchema } },
-    async (request) => {
-      const binding = bindingGate(request);
-      if (!binding.active) throw new Error('BINDING_REVOKED');
-      if (
-        !binding.connector ||
-        !registry.resolve(binding.connector, 'connector').acceptsImports
-      )
-        throw new Error('IMPORTS_NOT_SUPPORTED');
-      if (Buffer.byteLength(request.body.content) > 1_048_576)
-        throw new Error('PAYLOAD_TOO_LARGE');
+    async (request, reply) => {
+      const cancellation = requestCancellation(request, reply);
       try {
-        JSON.parse(request.body.content);
-      } catch {
-        throw new Error('INVALID_JSON');
+        const binding = bindingGate(request);
+        if (!binding.active) throw new Error('BINDING_REVOKED');
+        if (
+          !binding.connector ||
+          !registry.resolve(binding.connector, 'connector').acceptsImports
+        )
+          throw new Error('IMPORTS_NOT_SUPPORTED');
+        if (Buffer.byteLength(request.body.content) > 1_048_576)
+          throw new Error('PAYLOAD_TOO_LARGE');
+        try {
+          JSON.parse(request.body.content);
+        } catch {
+          throw new Error('INVALID_JSON');
+        }
+        try {
+          await registry.validateImport(
+            binding.connector,
+            request.body.content,
+            { signal: cancellation.signal },
+          );
+        } catch (error) {
+          const code = safeErrorCode(error, 'INVALID_IMPORT');
+          // Do not retain arbitrary native-plugin diagnostics containing imported
+          // text or credentials in the HTTP error chain; expose only a stable code.
+          // eslint-disable-next-line preserve-caught-error
+          throw new Error(code);
+        }
+        cancellation.assertActive();
+        bindingGate(request);
+        if (!catalog.getBinding(binding.id)?.active)
+          throw new Error('BINDING_REVOKED');
+        const object = store.putText(request.body.content);
+        const imported = critical(request, (context) =>
+          catalog.putImport(
+            binding.id,
+            {
+              id: randomUUID(),
+              filename: request.body.filename,
+              ...object,
+            },
+            request.body.expectedObjectId ?? null,
+            context,
+          ),
+        );
+        requestTargets.set(request, { objectId: imported.id });
+        return imported;
+      } finally {
+        cancellation.dispose();
       }
-      try {
-        await registry.validateImport(binding.connector, request.body.content);
-      } catch (error) {
-        const code = safeErrorCode(error, 'INVALID_IMPORT');
-        // Do not retain arbitrary native-plugin diagnostics containing imported
-        // text or credentials in the HTTP error chain; expose only a stable code.
-        // eslint-disable-next-line preserve-caught-error
-        throw new Error(code);
-      }
-      bindingGate(request);
-      if (!catalog.getBinding(binding.id)?.active)
-        throw new Error('BINDING_REVOKED');
-      const object = store.putText(request.body.content);
-      const imported = critical(request, (context) =>
-        catalog.putImport(
-          binding.id,
-          {
-            id: randomUUID(),
-            filename: request.body.filename,
-            ...object,
-          },
-          request.body.expectedObjectId ?? null,
-          context,
-        ),
-      );
-      requestTargets.set(request, { objectId: imported.id });
-      return imported;
     },
   );
   app.delete<{ Params: BindingParams & { objectId: string } }>(

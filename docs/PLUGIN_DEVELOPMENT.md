@@ -24,7 +24,7 @@
 - `configSchema`：运行时配置验证；`fields`给后台现有 text/select 表单渲染，不是任意插件 UI。
 - `artifactPaths`：需要锁定的实际源文件或构建产物的 file URL；包括影响行为的插件文件，不能只填包名。修改未列入清单的依赖不会自动成为完整供应链证明。
 - `invoke`：只返回来源/产物提案；可选 `validateConfig`做配置的附加验证。
-- connector可实现`validateImport(content, config)`做上传前预检；server必须await成功后才保存对象，invoke读取冻结对象时仍须复验。Session的格式/scope/已知秘密检查沿用同一parser。
+- connector可实现`validateImport(content, config, context?)`做上传前预检；server必须await成功后才保存对象，invoke读取冻结对象时仍须复验。Session的格式/scope/已知秘密检查沿用同一parser。
 - `acceptsImports`：是否接受用户主动上传的对象；connector 只可通过 host 提供的 `readImport`读取任务已冻结的对象引用。
 
 `packageRef`标识包及版本。`packageDigest`由manifest、config schema与声明的artifact字节计算；`configHash`来自规范序列化配置；`ref`是独立配置实例的版本身份，形如`instance:<UUID>@1`。同配置可有相同hash，却必须允许两个project/binding拥有各自的实例，不能用配置hash充当全局唯一实例ID。任务固定实例身份、包digest及配置hash；权限仍由project/binding上下文决定，不依赖ref保密。注册后的源字节漂移会拒绝执行，旧任务不会静默使用新代码。digest不是发行签名，trusted-native也不是操作系统沙箱。
@@ -83,6 +83,31 @@ pnpm check
 ```
 
 registry测试覆盖插件声明、实例锁、输出和import边界。[plugin-runtime.test.ts](../tests/integration/plugin-runtime.test.ts)给出完整的新增插件例子：合成`fixture.note` connector与`fixture.note-summary` processor仅通过`ApplicationOptions.registry`注册，随后经同一个HTTP binding→task→SQLite/文件commit→索引→MCP召回路径执行。没有为fixture修改route、Catalog或Coordinator。开发新包可以参考其中definition与验收结构；这些fixture不注册到默认列表，也不替代浏览器或模型验收。
+
+## 可复制的离线示例与验收
+
+[example-notes](../plugins/example-notes/src/index.ts) 是独立 workspace 包，包含 `example.notes@0.1.0` connector 和 `example.notes-summary@0.1.0` processor。前者只接受明确上传的 `{ "text": "..." }` JSON（正文 1–2000 字符、无额外字段），按导入对象 ID 生成稳定相对路径；后者生成确定性 Markdown 候选，并保持精确 `derivedFrom`。它不采集会话、不调用模型，也没有注册进默认服务器。
+
+复制该包后修改包名、manifest ID/版本、配置 TypeBox schema 和实现；把全部本地行为文件列入 `artifactPaths`。开发验收可将 definitions 传入 `new StaticRegistry([connector, processor])` 和 `createApplication({ registry, dataRoot, ownerToken, autoStart: false })`，仅使用新建临时目录与合成 token。正式装配仍需上文的 workspace 依赖和显式代码审查注册；没有动态安装命令或在线 manifest 执行入口。
+
+示例的通用 binding 配置使用 connector `{ "prefix": "Example" }`、processor `{ "heading": "Candidate" }`。创建 project/binding 后，向 `/api/projects/:id/bindings/:bindingId/imports` 上传 `filename` 和包含 JSON 的 `content`，再分别执行 `sync`、`process` 并等待 runs 为 `published`。以 reader token 搜索正文词，使用搜索返回的 **fileId 和 revisionId** 读取来源及产物，核对 citation/hash/lineage；不能只看到 202 就宣称验收通过。
+
+以下实际命令执行可复制的 conformance 入口，不需要外部来源、私密数据或模型认证：
+
+```sh
+pnpm exec vitest run tests/integration/example-plugin.test.ts
+pnpm exec vitest run packages/plugin-host/tests/registry.test.ts packages/plugin-host/tests/lifecycle.test.ts tests/integration/plugin-runtime.test.ts
+```
+
+第一个入口实际创建隔离服务器和数据目录，注册独立包，检查非法配置/上传不落盘、来源与产物任务发布、共同搜索、固定版本引用、分页和撤权。另包含真实 HTTP 断连时配置/导入取消，以及超时 native worker 迟到返回也不发布。第二个入口检查不兼容 manifest/protocol、包 digest 漂移、锁/能力、路径/预算/引用、失败不发布及各生命周期截止和配额；这些是应用/协议测试，不是已认证模型端到端。
+
+## 有界生命周期
+
+manifest 必须通过共享 `PluginManifestSchema`：协议固定 `1`、语义版本、合法 namespace ID、能力去重、server/official-trusted-native 和无未知字段；配置 schema 必须是 TypeBox object。`StaticRegistry` 默认每个 async config/import/connection/invoke 操作最多等待 30 秒，整个 registry 同时最多 4 个操作。开发构造参数仅允许 `timeoutMs` 10–30000、`maxConcurrent` 1–16；它们不是未验证的 HTTP 用户配置。
+
+host 向 hook 传入自己的 `AbortSignal`，同时传播调用方取消；HTTP 配置/导入连接断开会取消预检，落盘前再检查取消及当前授权。执行超时返回 `PLUGIN_TIMEOUT`，调用方取消返回 `CANCELLED`，配额耗尽返回 `RESOURCE_BUSY`；连接诊断保留 `CONNECTION_TEST_TIMEOUT/CANCELLED` 契约。只允许受审稳定错误码，未知 native 错误变为 `PROCESSING_FAILED`，不回传正文、凭据或任意 abort reason。
+
+超时或取消后迟到输出不会进入发布。仍在运行的 native Promise **继续占用配额直到实际结束**，避免反复超时绕过并发限制；冻结 import 端口在取消后拒绝读取。同步 CPU 阻塞、任意 native 磁盘/网络访问无法被进程内 timer 中断；永久不结束的操作会持续占槽。恢复需要受控停止整个实例，不提供任意第三方强隔离、自动重试或杀进程承诺。
 
 ## 安全与演进
 

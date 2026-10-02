@@ -31,7 +31,10 @@ export interface OfficialPlugin<I, O> {
   invoke(input: I, context: ExecutionContext): Promise<O>;
 }
 
-export type ConfigurationContext = { allowedLocalRepoRoot?: string };
+export type ConfigurationContext = {
+  allowedLocalRepoRoot?: string;
+  signal?: AbortSignal;
+};
 type DefinitionMetadata = {
   manifest: PluginManifest;
   /** Reviewed local source/build files. The registry hashes bytes, not package names. */
@@ -55,6 +58,7 @@ type DefinitionMetadata = {
   validateImport?(
     content: string,
     config: Record<string, unknown>,
+    context?: { signal: AbortSignal },
   ): void | Promise<void>;
 };
 export type ConnectorDefinition = DefinitionMetadata & {
