@@ -25,7 +25,9 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 ## TypeScript源码SDK
 
-`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。read成功响应的编码JSON上限112MiB，其他查询和错误响应仍为16MiB（maxResponseBytes默认112MiB，可收紧至128字节；实际按操作取较小上限）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
+`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。HTTP200 read成功响应的编码JSON上限112MiB，其他查询和错误响应仍为16MiB（maxResponseBytes默认112MiB，可收紧至128字节；实际按操作取较小上限）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
+
+成功状态只接受200；readiness额外接受503依赖诊断报告且仍用16MiB预算。其他2xx和3xx在读取正文/获取reader前返回INVALID_RESPONSE并取消响应体；HTTP4xx/5xx只按16MiB错误预算读安全envelope。伪造/缺失content-length不放宽实际流字节限制；真实重定向因redirect:error返回REQUEST_FAILED且不跟随目标。
 
 方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)、filesPage(projectId,{limit,cursor})。所有方法最后可传{signal}。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。成功响应、错误、分页和固定revision共享TypeBox schema，额外字段/未知形状拒绝而非静默丢弃；全文read复核正文UTF-8长度和SHA256；有限读取复核disclosure返回字节及textHash（完整文件hash保持在citation中），citation必须与文件/所请求revision一致。readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 
@@ -33,7 +35,7 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 ## MCP / Codex / Claude Code
 
-已有HTTP MCP入口为/mcp，工具context_search/context_read/context_tree；与REST使用相同服务门禁。最小权限token、显式project scope及Codex配置说明见[快速开始](QUICKSTART.md)。手工配置会写用户客户端配置，应由用户明确选择目标；本实现不会自动执行。Claude真实客户端、模型跨会话自主调用和真实回答尚未验收，不能以协议测试代替。
+已有HTTP MCP入口为/mcp，工具context_search/context_read/context_tree；与REST使用相同服务门禁。当前每个POST只支持一个JSON-RPC消息；数组batch（即使只有一条、或夹带initialize/通知）在认证后、创建transport/执行工具前整包拒绝：HTTP400，JSON-RPC -32600、id=null、固定message MCP_BATCH_UNSUPPORTED，无工具执行/成功审计，不回显成员ID/正文。底层SDK此前接受batch是未承诺的能力，依赖此行为的调用者必须逐个发送消息；单独initialize、通知和工具调用保持。单工具编码预算不能用来宣称batch总量受控；本实现不接受batch，也没有并发请求聚合SLO承诺。最小权限token、显式project scope及Codex配置说明见[快速开始](QUICKSTART.md)。手工配置会写用户客户端配置，应由用户明确选择目标；本实现不会自动执行。Claude真实客户端、模型跨会话自主调用和真实回答尚未验收，不能以协议测试代替。
 
 可选hook/recall skill安装器尚未提供，默认不配置hook。主动JSON Session导入见[Session指南](SESSION_IMPORT.md)，不等同自动历史读取或模型认证。
 

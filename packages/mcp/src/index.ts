@@ -91,6 +91,17 @@ const toolSchemas = {
 export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
   app.post('/mcp', async (request, reply) => {
     handlers.authenticate(request);
+    // One protocol message per HTTP request. Reject before creating a transport
+    // or executing any member; per-tool byte limits cannot bound a batch total.
+    if (Array.isArray(request.body))
+      return reply.code(400).send({
+        jsonrpc: '2.0',
+        id: null,
+        error: {
+          code: ErrorCode.InvalidRequest,
+          message: 'MCP_BATCH_UNSUPPORTED',
+        },
+      });
     const server = new Server(
       { name: 'opencontext', version: '0.0.0' },
       { capabilities: { tools: {} } },

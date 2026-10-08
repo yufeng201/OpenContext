@@ -6,6 +6,8 @@
 
 所有方法最后接受 `{ signal }`。`timeoutMs` 默认 15000ms，允许 10–15000；同一绝对单调期限覆盖 transport、响应 headers/body、解码/JSON/schema/citation/readiness 与固定正文 hash 校验。每次读取、阶段完成及返回前检查期限，配合 timer 中断等待；到期返回 TIMEOUT，调用方取消返回 CANCELLED，不传播其原始 reason。同步 CPU 不能被强抢占，但过期后不能返回成功。
 
+只接受HTTP200成功；readiness另接受503共享诊断报告。其他2xx及3xx在获取reader/消费正文前返回INVALID_RESPONSE，并取消body；真实fetch重定向因redirect:error返回REQUEST_FAILED，不跟随目标。只给200 read较大编码预算；所有错误及readiness503均16MiB。缺少/伪造content-length不改变实际流检查。此边界测试见`tests/integration/query-status-admission.test.ts`。
+
 `maxResponseBytes` 默认112MiB，允许128字节–112MiB，只能收紧各操作实际上限：read成功编码JSON112MiB，其他查询与错误响应16MiB。112MiB为16MiB UTF-8正文的最坏6倍JSON转义加16MiB编码metadata余量，并非允许112MiB原文件。正文对象超16MiB返回BYTE_LIMIT（服务端413）；声明/实际编码响应越界返回RESPONSE_TOO_LARGE。默认SDK/CLI与REST/MCP正文范围一致，包括控制字符最坏转义；更紧自定义预算仍可能提前拒绝。MCP重复包装由服务端单独限制256MiB+1024字节。建议默认outline/片段与offset续读；超16MiB对象本身仍拒绝，不能用片段绕过。编码预算不等于进程峰值内存/并发承诺。每次请求最多 8192 次 `reader.read()`（包含空 chunk 和 EOF），超过返回 RESPONSE_WORK_LIMIT；空 chunk 不保留，正文复制到最多 64KiB 的自有分段，避免保留任意 backing buffer。每64次读取让出事件循环，避免热流饿死 timer/调用方取消。过度碎片化的有效 JSON 也会因工作预算失败，调用方需显式处理，SDK 不截断或自动重试。失败/取消清理 reader、锁、timer 和监听器；不等待不合作 transport 的无限 Promise，迟到 response 尝试取消 body。
 
 禁止 redirect/cookie、明文远程 URL 和带凭据 URL；没有 token 持久化、写 API、自动 retry、Python SDK、OAuth、用户 Agent 自动配置或强 native 沙箱。

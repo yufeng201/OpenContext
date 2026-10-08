@@ -233,10 +233,18 @@ export class OpenContextClient {
         throw new OpenContextError(0, 'REQUEST_FAILED');
       }
       check();
-      const errorStatus = !response.ok && response.status !== diagnosticStatus;
+      const expectedStatus =
+        response.status === 200 || response.status === diagnosticStatus;
+      // Do not acquire/read an unexpected successful or redirect response body.
+      // Only 200 read responses receive the larger encoded-body allowance.
+      if (!expectedStatus && response.status < 400)
+        throw new OpenContextError(response.status, 'INVALID_RESPONSE');
+      const errorStatus = !expectedStatus;
       const maximum = Math.min(
         this.maximum,
-        errorStatus ? QUERY_RESPONSE_MAX_BYTES : queryResponseMaxBytes(schema),
+        response.status === 200
+          ? queryResponseMaxBytes(schema)
+          : QUERY_RESPONSE_MAX_BYTES,
       );
       let data: unknown;
       try {
