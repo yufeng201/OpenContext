@@ -95,7 +95,10 @@ it('REST, SDK, MCP and CLI share fixed reads and current permission gates on a l
       },
     );
   git('init', '-b', 'main');
-  writeFileSync(resolve(repo, 'README.md'), '# Synthetic\nquery-sdk-needle\n');
+  writeFileSync(
+    resolve(repo, 'README.md'),
+    '# Synthetic\nquery-sdk-needle\n## Memory\n中文🙂 bounded recall\n## Next\nOther\n',
+  );
   git('add', '.');
   git('commit', '-m', 'fixture');
   const app = createApplication({
@@ -222,6 +225,81 @@ it('REST, SDK, MCP and CLI share fixed reads and current permission gates on a l
     expect(output.code).toBe(0);
     expect(JSON.parse(output.out)).toEqual(fixed);
     expect(output.err).not.toContain(reader.token);
+    const ignoresBudget = new OpenContextClient({
+      baseUrl,
+      token: reader.token,
+      fetch: async () =>
+        new Response(JSON.stringify(fixed), {
+          headers: { 'content-type': 'application/json' },
+        }),
+    });
+    await expect(
+      ignoresBudget.read(project.id, file.fileId, file.revisionId, {
+        maxBytes: 4,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+
+    for (const selector of [
+      { startLine: 2, maxLines: 1, maxBytes: 64 },
+      { section: 'Memory', maxBytes: 16 },
+      { maxBytes: 8 },
+      { outline: true, maxBytes: 4096 },
+    ]) {
+      const fragment = await client.read(
+        project.id,
+        file.fileId,
+        file.revisionId,
+        selector,
+      );
+      expect(fragment.citation).toEqual(fixed.citation);
+      expect(fragment.disclosure!.returnedBytes).toBeLessThanOrEqual(
+        selector.maxBytes,
+      );
+      const params = new URLSearchParams({
+        fileId: file.fileId,
+        revisionId: file.revisionId,
+        ...Object.fromEntries(
+          Object.entries(selector).map(([k, v]) => [k, String(v)]),
+        ),
+      });
+      const http = await fetch(
+        baseUrl + projectQueryPath(QueryRoutes.read, project.id) + '?' + params,
+        { headers: { authorization: 'Bearer ' + reader.token } },
+      );
+      expect(http.status).toBe(200);
+      expect(await http.json()).toEqual(fragment);
+      const rpc = await mcp('context_read', {
+        projectId: project.id,
+        fileId: file.fileId,
+        revisionId: file.revisionId,
+        ...selector,
+      });
+      expect(rpc.result.structuredContent).toEqual(fragment);
+      const flags = Object.entries(selector).flatMap(([k, v]) => [
+        '--' + k.replace(/[A-Z]/g, (ch) => '-' + ch.toLowerCase()),
+        String(v),
+      ]);
+      const command = await cli(
+        'read',
+        project.id,
+        file.fileId,
+        file.revisionId,
+        ...flags,
+      );
+      expect(command.code).toBe(0);
+      expect(JSON.parse(command.out)).toEqual(fragment);
+    }
+    const invalidSelector = await cli(
+      'read',
+      project.id,
+      file.fileId,
+      file.revisionId,
+      '--max-bytes',
+      '3',
+    );
+    expect(invalidSelector.code).toBe(1);
+    expect(JSON.parse(invalidSelector.err).error).toBe('INVALID_SCHEMA');
+
     const deniedWrite = await app.app.inject({
       method: 'POST',
       url: QueryRoutes.projects,
@@ -250,6 +328,12 @@ it('REST, SDK, MCP and CLI share fixed reads and current permission gates on a l
       (await client.read(project.id, file.fileId, file.revisionId)).text,
     ).toBe(fixed.text);
     app.catalog.revokeBinding(binding.id);
+    await expect(
+      client.read(project.id, file.fileId, file.revisionId, {
+        section: 'Memory',
+        maxBytes: 64,
+      }),
+    ).rejects.toMatchObject({ status: 404 });
     await expect(
       client.read(project.id, file.fileId, file.revisionId),
     ).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' });

@@ -135,12 +135,14 @@ export function FileBrowser({
   loading,
   onOpen,
   onRefresh,
+  onAddSource,
   children,
 }: {
   files: FileEntry[];
   loading: boolean;
   onOpen: (file: FileEntry) => void;
   onRefresh: () => void;
+  onAddSource?: (() => void) | undefined;
   children?: ReactNode;
 }) {
   const [params, setParams] = useSearchParams();
@@ -373,6 +375,11 @@ export function FileBrowser({
                 {filter || type !== 'all'
                   ? '没有符合筛选的文件。请调整搜索或文件视图。'
                   : '此目录暂无已发布文件。请从数据源完成同步。'}
+                {!files.length && !filter && type === 'all' && onAddSource ? (
+                  <Button className="mt-3" onClick={onAddSource}>
+                    新增数据源
+                  </Button>
+                ) : null}
               </Empty>
             )}
           </div>

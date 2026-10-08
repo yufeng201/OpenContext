@@ -29,6 +29,8 @@ pnpm dev
 
 指定群采集与主题/结论/待办/需求候选已加入静态插件，见[飞书群指南](docs/FEISHU_CHAT.md)。目前只以注入的模拟官方响应完成网络适配与归档闭环验证；真实群读取仍需服务器配置限定范围的凭据，网页不接收明文 token。
 
+上下文与记忆以 Markdown 正文及渐进披露为核心；原始材料保持原格式。当前可按固定版本读取行/章节并限定字节预算，见[Markdown 上下文与渐进披露](docs/PROGRESSIVE_CONTEXT.md)。
+
 ## 当前能力与边界
 
 | 已能验证 | 尚未交付 |
@@ -58,7 +60,7 @@ MCP 的官方协议客户端和真实 Codex 客户端显式 RPC 传输已验证�
 
 ## 本地查询接入与文档站（源码预览）
 
-查询路径与TypeBox请求契约共用；`/api/openapi.json`是查询子集，源码TS SDK和只读CLI不存token。详见[查询接入](docs/QUERY_ACCESS.md)。`pnpm docs:build`生成14页静态文档、OpenAPI和llms.txt；`pnpm docs:preview`仅在本机4400预览。没有发布npm/PyPI或公开部署网站。停写快照和新目录恢复已实现；生产RPO/RTO、断电耐久性、加密签名、完整管理响应schema及真实Agent E2E仍待验收。
+查询路径与TypeBox请求契约共用；`/api/openapi.json`是查询子集，源码TS SDK和只读CLI不存token。详见[查询接入](docs/QUERY_ACCESS.md)。`pnpm docs:build`生成15页静态文档、OpenAPI和llms.txt；`pnpm docs:preview`仅在本机4400预览。没有发布npm/PyPI或公开部署网站。停写快照和新目录恢复已实现；生产RPO/RTO、断电耐久性、加密签名、完整管理响应schema及真实Agent E2E仍待验收。
 
 停写备份与恢复：`pnpm admin --help`、`pnpm drill:restore`，见[运维操作](docs/BACKUP_RECOVERY.md)。恢复只使用新目录，默认撤销旧reader token；不覆盖用户数据。
 

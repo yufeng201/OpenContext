@@ -1,4 +1,10 @@
 import {
+  ReadQuerySchema,
+  parseReadQuery,
+} from '@opencontext/contracts/query-api';
+import { disclose } from './disclosure.ts';
+import type { ReadOptions } from '@opencontext/contracts';
+import {
   CURRENT_STORAGE_VERSION,
   APPLICATION_COMPATIBILITY,
 } from '@opencontext/contracts/maintenance';
@@ -35,7 +41,6 @@ import {
   CreateBindingSchema,
   SearchSchema,
   LoginSchema,
-  ReadSchema,
   ReadResultSchema,
   SearchResultSchema,
   MAX_AUTH_TOKEN_LENGTH,
@@ -51,7 +56,7 @@ import type {
   ImportUploadInput,
 } from '@opencontext/contracts';
 import { Catalog } from '@opencontext/state-sqlite';
-import { FileStore } from '@opencontext/storage-fs';
+import { FileStore, MAX_TEXT_READ_BYTES } from '@opencontext/storage-fs';
 import { search } from '@opencontext/retrieval';
 import { registerMcp } from '@opencontext/mcp';
 import { Coordinator } from './coordinator.ts';
@@ -306,6 +311,7 @@ export function createApplication(options: ApplicationOptions) {
       projectId: string,
       fileId: string,
       revisionId: string,
+      options: ReadOptions = {},
     ): ReadResult {
       authorize(principal, projectId);
       const currentFiles = new Map(
@@ -360,13 +366,14 @@ export function createApplication(options: ApplicationOptions) {
           ? catalog.head(projectId)
           : catalog.getRevisionCommit(projectId, fileId, revisionId);
       if (!commitId) throw new Error('NOT_FOUND');
+      if (file.bytes > MAX_TEXT_READ_BYTES) throw new Error('BYTE_LIMIT');
       const text = store.readText(file.contentHash);
       if (createHash('sha256').update(text).digest('hex') !== file.contentHash)
         throw new Error('CORRUPT_OBJECT');
       authorize(principal, projectId);
       return {
         file,
-        text,
+        ...disclose(text, file.logicalPath, options),
         citation: {
           uri: 'oc://space/' + projectId + '/file/' + fileId + '@' + revisionId,
           projectId,
@@ -927,24 +934,24 @@ export function createApplication(options: ApplicationOptions) {
         { projectId: request.params.id, limit: request.body.limit ?? 10 },
       ),
   );
-  app.get<{
-    Params: ProjectParams;
-    Querystring: { fileId: string; revisionId: string };
-  }>(QueryRoutes.read, { schema: { querystring: ReadSchema } }, (request) =>
-    parseQueryResponse(
-      ReadResultSchema,
-      services.read(
-        authenticate(request),
-        request.params.id,
-        request.query.fileId,
-        request.query.revisionId,
-      ),
-      {
-        projectId: request.params.id,
-        fileId: request.query.fileId,
-        revisionId: request.query.revisionId,
-      },
-    ),
+  app.get<{ Params: ProjectParams; Querystring: Record<string, unknown> }>(
+    QueryRoutes.read,
+    { schema: { querystring: ReadQuerySchema } },
+    (request) => {
+      const principal = authenticate(request);
+      const { fileId, revisionId, ...options } = parseReadQuery(request.query);
+      return parseQueryResponse(
+        ReadResultSchema,
+        services.read(
+          principal,
+          request.params.id,
+          fileId,
+          revisionId,
+          options,
+        ),
+        { projectId: request.params.id, fileId, revisionId },
+      );
+    },
   );
   app.post<{ Params: ProjectParams }>('/api/projects/:id/tokens', (request) => {
     authorize(authenticate(request), request.params.id, true);

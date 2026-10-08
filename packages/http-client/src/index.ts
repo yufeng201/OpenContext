@@ -1,3 +1,5 @@
+import { assertReadSelection } from '@opencontext/contracts/query-api';
+import type { ReadOptions } from '@opencontext/contracts';
 import { performance } from 'node:perf_hooks';
 import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import {
@@ -346,7 +348,7 @@ export class OpenContextClient {
           const read = result as ReadResult;
           if (
             createHash('sha256').update(read.text).digest('hex') !==
-            read.file.contentHash
+            (read.disclosure?.textHash ?? read.file.contentHash)
           )
             throw new OpenContextError(response.status, 'INVALID_RESPONSE');
           check();
@@ -468,19 +470,38 @@ export class OpenContextClient {
     projectId: string,
     fileId: string,
     revisionId: string,
-    options: QueryRequestOptions = {},
+    options: QueryRequestOptions & ReadOptions = {},
   ): Promise<ReadResult> {
-    if (!Value.Check(ReadSchema, { fileId, revisionId }))
+    const selector = Object.fromEntries(
+      Object.entries(options).filter(
+        ([key, value]) => key !== 'signal' && value !== undefined,
+      ),
+    ) as ReadOptions;
+    if (!Value.Check(ReadSchema, { fileId, revisionId, ...selector }))
       throw new OpenContextError(0, 'INVALID_SCHEMA');
     const result = await this.request<ReadResult>(
       projectQueryPath(QueryRoutes.read, projectId) +
         '?' +
-        new URLSearchParams({ fileId, revisionId }),
+        new URLSearchParams({
+          fileId,
+          revisionId,
+          ...Object.fromEntries(
+            Object.entries(selector).map(([key, value]) => [
+              key,
+              String(value),
+            ]),
+          ),
+        }),
       ReadResultSchema,
       undefined,
       options,
       { projectId, fileId, revisionId },
     );
+    try {
+      assertReadSelection(result, selector);
+    } catch {
+      throw new OpenContextError(200, 'INVALID_RESPONSE');
+    }
     return result;
   }
 }

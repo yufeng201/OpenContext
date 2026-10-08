@@ -40,8 +40,20 @@ export const LoginSchema = Type.Object(
   { token: Type.String({ minLength: 16, maxLength: MAX_AUTH_TOKEN_LENGTH }) },
   { additionalProperties: false },
 );
+export const ReadOptionsSchema = Type.Object(
+  {
+    startLine: Type.Optional(Type.Integer({ minimum: 1, maximum: 16777216 })),
+    maxLines: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+    section: Type.Optional(Type.String({ minLength: 1, maxLength: 2000 })),
+    outline: Type.Optional(Type.Boolean()),
+    maxBytes: Type.Optional(Type.Integer({ minimum: 4, maximum: 65536 })),
+    offsetBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: 16777216 })),
+  },
+  { additionalProperties: false },
+);
+export type ReadOptions = Static<typeof ReadOptionsSchema>;
 export const ReadSchema = Type.Object(
-  { fileId: Id, revisionId: Id },
+  { fileId: Id, revisionId: Id, ...ReadOptionsSchema.properties },
   { additionalProperties: false },
 );
 export type SearchInput = Static<typeof SearchSchema>;
@@ -150,6 +162,45 @@ export const ReadResultSchema = Type.Object(
     file: FileEntrySchema,
     text: Type.String({ maxLength: 16777216 }),
     citation: CitationSchema,
+    outline: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            title: Type.String({ maxLength: 2000 }),
+            line: Type.Integer({ minimum: 1 }),
+            level: Type.Integer({ minimum: 1, maximum: 6 }),
+          },
+          { additionalProperties: false },
+        ),
+        { maxItems: 200 },
+      ),
+    ),
+    disclosure: Type.Optional(
+      Type.Object(
+        {
+          mode: Type.Union([
+            Type.Literal('outline'),
+            Type.Literal('full'),
+            Type.Literal('lines'),
+            Type.Literal('section'),
+          ]),
+          startLine: Type.Integer({ minimum: 1 }),
+          fullBytes: Type.Integer({ minimum: 0 }),
+          selectedBytes: Type.Integer({ minimum: 0 }),
+          returnedBytes: Type.Integer({ minimum: 0, maximum: 65536 }),
+          offsetBytes: Type.Integer({ minimum: 0 }),
+          nextOffsetBytes: Type.Union([
+            Type.Integer({ minimum: 0 }),
+            Type.Null(),
+          ]),
+          nextOutlineLine: Type.Optional(
+            Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+          ),
+          textHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+        },
+        { additionalProperties: false },
+      ),
+    ),
   },
   { additionalProperties: false },
 );

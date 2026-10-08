@@ -1,3 +1,5 @@
+import type { ReadOptions } from '@opencontext/contracts';
+import { markdownBlocks } from './lib/markdown';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -604,6 +606,11 @@ function Workspace({
                 files={files}
                 loading={tree.isPending}
                 onRefresh={() => void invalidate()}
+                onAddSource={
+                  session.role === 'owner' && bindings.data?.length === 0
+                    ? () => setSourceDrawer(true)
+                    : undefined
+                }
                 onOpen={(file) =>
                   navigate({
                     dir: parentPath(file.logicalPath),
@@ -1018,15 +1025,17 @@ function Reader({
   scope: readonly unknown[];
   onClose: () => void;
 }) {
+  const [selection, setSelection] = useState<ReadOptions>({ maxBytes: 8192 });
+  const [outlineLine, setOutlineLine] = useState(1);
   const [copied, setCopied] = useState(false);
   const [readerTab, setReaderTab] = useState('preview');
   const [copyError, setCopyError] = useState(false);
   const read = useQuery({
-    queryKey: [...scope, 'read', fileId, revisionId],
+    queryKey: [...scope, 'read', fileId, revisionId, selection],
     queryFn: async ({ signal }) => {
       try {
         return await api<ReadResult>(
-          `/projects/${encodeURIComponent(projectId)}/read?${new URLSearchParams({ fileId, revisionId })}`,
+          `/projects/${encodeURIComponent(projectId)}/read?${new URLSearchParams({ fileId, revisionId, ...Object.fromEntries(Object.entries(selection).map(([k, v]) => [k, String(v)])) })}`,
           { signal },
         );
       } catch (error) {
@@ -1041,6 +1050,17 @@ function Reader({
     refetchInterval: 3000,
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: 'always',
+  });
+  const outline = useQuery({
+    queryKey: [...scope, 'outline', fileId, revisionId, outlineLine],
+    enabled: Boolean(read.data?.file.logicalPath.toLowerCase().endsWith('.md')),
+    queryFn: ({ signal }) =>
+      api<ReadResult>(
+        `/projects/${encodeURIComponent(projectId)}/read?${new URLSearchParams({ fileId, revisionId, outline: 'true', startLine: String(outlineLine), maxBytes: '4096' })}`,
+        { signal },
+      ),
+    staleTime: 0,
+    refetchInterval: 3000,
   });
   return (
     <Card className="file-reader" aria-label="固定版本原文">
@@ -1121,13 +1141,99 @@ function Reader({
               </Alert>
             ) : null}
             {readerTab === 'preview' ? (
-              <div className="markdown-preview">
-                {read.data.file.logicalPath.endsWith('.md') ? (
-                  <SafeMarkdown text={read.data.text} />
-                ) : (
-                  <pre>{read.data.text}</pre>
-                )}
-              </div>
+              <>
+                <div
+                  className="mb-3 flex flex-wrap items-center gap-2 text-xs"
+                  role="group"
+                  aria-label="渐进式读取"
+                >
+                  <span>
+                    {read.data.disclosure
+                      ? `本次 ${read.data.disclosure.returnedBytes} bytes；全文 ${read.data.file.bytes} bytes`
+                      : `全文 ${read.data.file.bytes} bytes`}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSelection({ maxBytes: 8192 })}
+                  >
+                    从头有限读取
+                  </Button>
+                  {read.data.disclosure?.nextOffsetBytes !== null &&
+                  read.data.disclosure?.nextOffsetBytes !== undefined ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        setSelection({
+                          ...selection,
+                          offsetBytes: read.data!.disclosure!.nextOffsetBytes!,
+                        })
+                      }
+                    >
+                      读取下一段
+                    </Button>
+                  ) : null}
+                  {read.data.disclosure ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setSelection({})}
+                    >
+                      读取全文
+                    </Button>
+                  ) : null}
+                </div>
+                {outline.data?.outline ? (
+                  <nav
+                    aria-label="Markdown 章节目录"
+                    className="mb-3 flex flex-wrap gap-2"
+                  >
+                    {outline.data.outline.map((item) => (
+                      <Button
+                        key={item.line}
+                        size="sm"
+                        variant="ghost"
+                        onClick={() =>
+                          setSelection({
+                            startLine: item.line,
+                            maxLines: 40,
+                            maxBytes: 8192,
+                          })
+                        }
+                      >
+                        {item.title} · 第 {item.line} 行
+                      </Button>
+                    ))}
+                    {outline.data.disclosure?.nextOutlineLine ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          setOutlineLine(
+                            outline.data!.disclosure!.nextOutlineLine!,
+                          )
+                        }
+                      >
+                        更多章节
+                      </Button>
+                    ) : null}
+                  </nav>
+                ) : null}
+                {outline.error ? (
+                  <Alert>
+                    {errorText(outline.error)}；正文仍可按有限读取查看。
+                  </Alert>
+                ) : null}
+                <div className="markdown-preview">
+                  {read.data.file.logicalPath.endsWith('.md') &&
+                  !read.data.disclosure?.offsetBytes ? (
+                    <SafeMarkdown text={read.data.text} />
+                  ) : (
+                    <pre>{read.data.text}</pre>
+                  )}
+                </div>
+              </>
             ) : null}
             {readerTab === 'version' ? (
               <div className="version-details">
@@ -1222,7 +1328,9 @@ function Reader({
               {read.data.citation.uri}
             </p>
             <details className="raw-text">
-              <summary>查看原始文本</summary>
+              <summary>
+                {read.data.disclosure ? '查看本次返回文本' : '查看原始文本'}
+              </summary>
               <pre>{read.data.text}</pre>
             </details>
           </>
@@ -1234,23 +1342,15 @@ function Reader({
 
 function SafeMarkdown({ text }: { text: string }) {
   // Deliberately support only inert text structure: no raw HTML, URL, or executable content.
-  let inCode = false;
   return (
     <>
-      {text.split('\n').map((line, index) => {
-        if (line.startsWith('```')) {
-          inCode = !inCode;
+      {markdownBlocks(text).map((block, index) => {
+        const line = block.text;
+        if (block.kind === 'code')
           return (
-            <div key={index} className="code-delimiter">
-              {line}
-            </div>
-          );
-        }
-        if (inCode)
-          return (
-            <div className="markdown-code" key={index}>
-              {line || '\u00a0'}
-            </div>
+            <pre key={index}>
+              <code>{line}</code>
+            </pre>
           );
         if (line.startsWith('### '))
           return <h4 key={index}>{line.slice(4)}</h4>;

@@ -1,3 +1,5 @@
+import { assertReadSelection } from '@opencontext/contracts/query-api';
+import type { ReadOptions } from '@opencontext/contracts';
 import { createHash } from 'node:crypto';
 import { safeErrorCode } from '@opencontext/contracts/errors';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -62,6 +64,7 @@ export type McpHandlers = {
     projectId: string,
     fileId: string,
     revisionId: string,
+    options?: ReadOptions,
   ): ReadResult;
 };
 
@@ -100,7 +103,7 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
             name === 'context_search'
               ? 'Search source and derived files within an explicitly authorized project. Read cited revisions before using them.'
               : name === 'context_read'
-                ? 'Read a fixed file revision; current project authorization still applies.'
+                ? 'Read a fixed revision. Start with outline:true for a bounded Markdown heading directory, then read by line, section or continuation. For progressive disclosure use section (exact ATX Markdown heading) or startLine/maxLines, maxBytes (4–65536, default 8192) and offsetBytes for continuation. Citation/hash identify the full file; disclosure.textHash identifies only returned text. Current authorization applies.'
                 : 'List current authorized project files; deleted and invalid files are excluded.',
           inputSchema: schema,
           outputSchema:
@@ -164,6 +167,12 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
                 args.projectId,
                 args.fileId,
                 args.revisionId,
+                (({
+                  projectId: _projectId,
+                  fileId: _fileId,
+                  revisionId: _revisionId,
+                  ...options
+                }) => options)(args),
               ),
               {
                 projectId: args.projectId,
@@ -171,9 +180,15 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
                 revisionId: args.revisionId,
               },
             );
+            const selector = Object.fromEntries(
+              Object.entries(args).filter(
+                ([key]) => !['projectId', 'fileId', 'revisionId'].includes(key),
+              ),
+            ) as ReadOptions;
+            assertReadSelection(result, selector);
             if (
               createHash('sha256').update(result.text).digest('hex') !==
-              result.file.contentHash
+              (result.disclosure?.textHash ?? result.file.contentHash)
             )
               throw new Error('INVALID_RESPONSE');
             break;

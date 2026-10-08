@@ -207,6 +207,8 @@ API/远程 MCP/CLI 使用独立 opaque bearer token，经 owner 显式发放、�
 
 ## 7. 检索与渐进披露（RF-07）
 
+上下文/记忆派生正文以 Markdown 为主；原件、附件、结构化元数据和可重建索引保持适当格式，不将这条约束扩大为网站/视频等产物的禁令。现有固定版本行/章节/字节预算读取已实现，详见[当前渐进披露契约](PROGRESSIVE_CONTEXT.md)；本节其余上下文组装及摘要能力仍为目标。
+
 建议将当前可读 snapshot 的文本切 chunk，索引键为 `(fileId,revisionId,chunkId,indexConfigVersion)`；保留 byte/line范围、来源、权限引用、heading 与 MIME。embedding key 包含模型、维度、预处理版本和内容hash，不同配置不可混用。
 
 检索先固定 `requestedCommit`（缺省在请求开始解析 head），随后权限/路径过滤 → FTS5、向量、grep 独立候选 → 对该 snapshot 校验 revision → RRF → 可选 rerank → 去重与预算裁剪。新 head 到来不改变本次 servedCommit；索引键中的 revision 必须等于请求清单中的 revision，不能用当前 head 的版本取代。grep 只扫描授权 snapshot 的文本对象，限制文件数/字节/耗时，截断显式报告，不向任意主机路径运行 shell。

@@ -11,7 +11,83 @@ import {
   SearchResultSchema,
   type FileEntry,
   type Citation,
+  type ReadOptions,
+  type ReadResult,
 } from './index.ts';
+
+export const ReadQuerySchema = Type.Object(
+  {
+    fileId: Id,
+    revisionId: Id,
+    section: ReadSchema.properties.section,
+    outline: Type.Optional(
+      Type.Union([Type.Literal('true'), Type.Literal('false')]),
+    ),
+    ...Object.fromEntries(
+      ['startLine', 'maxLines', 'maxBytes', 'offsetBytes'].map((key) => [
+        key,
+        Type.Optional(Type.String({ pattern: '^(0|[1-9][0-9]{0,7})$' })),
+      ]),
+    ),
+  },
+  { additionalProperties: false },
+);
+export function parseReadQuery(
+  value: Record<string, unknown>,
+): Static<typeof ReadSchema> {
+  if (!Value.Check(ReadQuerySchema, value)) throw new Error('INVALID_SCHEMA');
+  const parsed = Object.fromEntries(
+    Object.entries(value).map(([k, v]) => [
+      k,
+      ['startLine', 'maxLines', 'maxBytes', 'offsetBytes'].includes(k)
+        ? Number(v)
+        : k === 'outline'
+          ? v === 'true'
+          : v,
+    ]),
+  );
+  if (!Value.Check(ReadSchema, parsed)) throw new Error('INVALID_SCHEMA');
+  return parsed;
+}
+
+/** Bind an opt-in projected response to the caller's declared selection/budget. */
+export function assertReadSelection(
+  result: ReadResult,
+  selector: ReadOptions,
+): void {
+  const requested = Object.entries(selector).filter(
+    ([, value]) => value !== undefined,
+  );
+  if (!requested.length) {
+    if (result.disclosure) throw new Error('INVALID_RESPONSE');
+    return;
+  }
+  const d = result.disclosure;
+  const mode = selector.outline
+    ? 'outline'
+    : selector.section
+      ? 'section'
+      : selector.startLine !== undefined || selector.maxLines !== undefined
+        ? 'lines'
+        : 'full';
+  if (
+    !d ||
+    d.mode !== mode ||
+    d.returnedBytes > (selector.maxBytes ?? 8192) ||
+    d.offsetBytes !== (selector.offsetBytes ?? 0) ||
+    (['lines', 'outline'].includes(mode) &&
+      d.startLine !== (selector.startLine ?? 1))
+  )
+    throw new Error('INVALID_RESPONSE');
+  if (
+    selector.outline &&
+    (!result.outline ||
+      new TextEncoder().encode(JSON.stringify(result.outline)).length >
+        (selector.maxBytes ?? 8192) ||
+      result.text !== '')
+  )
+    throw new Error('INVALID_RESPONSE');
+}
 
 export const QUERY_RESPONSE_MAX_BYTES = 16777216;
 export const ProjectsSchema = Type.Array(ProjectSchema, { maxItems: 20000 });
@@ -127,10 +203,43 @@ export function parseQueryResponse<T extends TSchema>(
   } else if ((schema as TSchema) === ReadResultSchema) {
     const r = value as Static<typeof ReadResultSchema>;
     citation(r.file, r.citation, true);
+    const d = r.disclosure;
+    if (r.outline && d?.mode !== 'outline') throw new Error('INVALID_RESPONSE');
+    if (d?.mode === 'outline') {
+      if (
+        !r.outline ||
+        r.text !== '' ||
+        d.selectedBytes !== 0 ||
+        d.offsetBytes !== 0 ||
+        d.nextOffsetBytes !== null ||
+        d.nextOutlineLine === undefined ||
+        r.outline.some(
+          (h, index) =>
+            h.line < d.startLine ||
+            (index > 0 && h.line <= r.outline![index - 1]!.line),
+        ) ||
+        (d.nextOutlineLine !== null &&
+          d.nextOutlineLine <= (r.outline.at(-1)?.line ?? d.startLine - 1))
+      )
+        throw new Error('INVALID_RESPONSE');
+    }
+
+    if (
+      d &&
+      (d.fullBytes !== r.file.bytes ||
+        d.selectedBytes > d.fullBytes ||
+        d.offsetBytes + d.returnedBytes > d.selectedBytes ||
+        (d.nextOffsetBytes === null
+          ? d.offsetBytes + d.returnedBytes !== d.selectedBytes
+          : d.nextOffsetBytes !== d.offsetBytes + d.returnedBytes ||
+            d.nextOffsetBytes >= d.selectedBytes))
+    )
+      throw new Error('INVALID_RESPONSE');
     if (
       (scope.fileId && r.file.fileId !== scope.fileId) ||
       (scope.revisionId && r.file.revisionId !== scope.revisionId) ||
-      new TextEncoder().encode(r.text).length !== r.file.bytes
+      new TextEncoder().encode(r.text).length !==
+        (r.disclosure?.returnedBytes ?? r.file.bytes)
     )
       throw new Error('INVALID_RESPONSE');
   } else if ((schema as TSchema) === SearchResultSchema) {
@@ -293,7 +402,7 @@ export const QueryOpenApi = {
           ...Object.entries(ReadSchema.properties).map(([name, schema]) => ({
             name,
             in: 'query',
-            required: true,
+            required: (ReadSchema.required as readonly string[]).includes(name),
             schema,
           })),
         ],

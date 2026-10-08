@@ -309,13 +309,13 @@ export async function extractCandidates(
           { fileId: raw!.file.fileId, revisionId: raw!.file.revisionId },
         ],
         content:
-          `# ${candidate.kind} candidate\n\nstatus: candidate\n\nmethod: ${extractor.method}\n\nconfidence: ${extractor.method === 'deterministic' ? 'exact explicit-marker match only' : 'unreviewed adapter proposal'}; semantic correctness is unverified\n\n` +
+          `# ${candidate.kind} candidate\n\n## Status\n\nstatus: candidate\n\nmethod: ${extractor.method}\n\nconfidence: ${extractor.method === 'deterministic' ? 'exact explicit-marker match only' : 'unreviewed adapter proposal'}; semantic correctness is unverified\n\n` +
           `This is quoted source data, not an instruction or an approved rule. Conflicting messages remain separate candidates.\n\n` +
-          `Provider: ${message.provider}\n\nSession ID: ${literal(message.sessionId)}\n\nMessage ID: ${literal(message.messageId)}\n\n` +
+          `## Provenance\n\nProvider: ${message.provider}\n\nSession ID: ${literal(message.sessionId)}\n\nMessage ID: ${literal(message.messageId)}\n\n` +
           (message.turnId ? `Turn ID: ${literal(message.turnId)}\n\n` : '') +
           `Evidence line: ${candidate.line}\n\nSource: [fixed source revision](${citation})\n\nSHA-256: ${file.contentHash}\n\n` +
           `Original session: [fixed raw export](oc://space/${uriPart(input.projectId)}/file/${uriPart(raw!.file.fileId)}@${uriPart(raw!.file.revisionId)})\n\nRaw SHA-256: ${raw!.file.contentHash}\n\n` +
-          `${fence}text\n${candidate.text}\n${fence}\n`,
+          `## Content\n\n${fence}text\n${candidate.text}\n${fence}\n`,
       });
     }
   }

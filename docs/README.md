@@ -13,6 +13,8 @@
 - [开发指南](DEVELOPMENT.md)：工程检查、测试与贡献流程。
 - [离线 live 验收 gate](LIVE_GATE.md)：脱敏调用证据、固定版本/hash/引用关联与失败拒绝；合成通过不代表真实模型通过。
 
+上下文与记忆以 Markdown 正文及渐进披露为核心；原始材料保持原格式。当前可按固定版本读取行/章节并限定字节预算，见[Markdown 上下文与渐进披露](PROGRESSIVE_CONTEXT.md)。
+
 ## 产品设计
 
 - [PRD](PRD.md)：目标、编号需求、验收与阶段。

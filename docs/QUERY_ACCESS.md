@@ -27,7 +27,7 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 `packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。解码响应上限16MiB（maxResponseBytes可收紧至128字节）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
 
-方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)、filesPage(projectId,{limit,cursor})。所有方法最后可传{signal}。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。成功响应、错误、分页和固定revision共享TypeBox schema，额外字段/未知形状拒绝而非静默丢弃；read复核正文UTF-8长度和SHA256，citation必须与文件/所请求revision一致。readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
+方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)、filesPage(projectId,{limit,cursor})。所有方法最后可传{signal}。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。成功响应、错误、分页和固定revision共享TypeBox schema，额外字段/未知形状拒绝而非静默丢弃；全文read复核正文UTF-8长度和SHA256；有限读取复核disclosure返回字节及textHash（完整文件hash保持在citation中），citation必须与文件/所请求revision一致。readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 
 可执行合成示例及REST/SDK/MCP一致性、跨project/历史/revoke测试在tests/integration/query-access.test.ts；它们不调用模型。
 
@@ -68,3 +68,7 @@ pnpm exec vitest run tests/integration/query-response.test.ts tests/integration/
 SDK整请求使用单调时钟的绝对期限（默认15秒，配置10–15000ms），覆盖transport、headers/body、解码/JSON/schema/citation/readiness和固定正文SHA256；每阶段结束与返回前复验，同步处理过期不能返回成功。单个请求最多8192次body读取（含空chunk/EOF），超限为RESPONSE_WORK_LIMIT；空chunk不保留，自有分段最多64KiB，每64次读取让出事件循环。超过碎片工作预算也会拒绝有效JSON，不能当字节截断或自动retry。同步transport throw、异步reject都稳定转换为REQUEST_FAILED，CLI按共享错误白名单输出。详情及可执行边界测试见[SDK包说明](../packages/http-client/README.md)。
 
 SDK错误始终是新建闭合对象，CLI另行投影metadata：只保留有限白名单code、0或100–599整数status与合法36字符UUID；不信任外部同类Error的message、name、correlationId、cause/details或stack，不执行错误getter/prototype检查。受审平台code和合法UUID保留，原始诊断不进入SDK/CLI输出。相邻getter/proxy/构造测试为 `tests/integration/error-projection.test.ts`。
+
+## 默认先有限披露
+
+新Agent接入先分页发现文件和搜索短片段；对于Markdown，先`context_read`传`outline: true, maxBytes: 4096`取得确定性标题目录，再按行/章节读取8KiB以内片段，必要时用offset续读及追溯原件。固定revision不能省略。全文是显式选择；旧客户端全文行为仍兼容。参数、片段hash与全文hash区别、Reader入口及16MiB对象预检见[渐进披露契约](PROGRESSIVE_CONTEXT.md)。这不是已认证模型自主调用验收。
