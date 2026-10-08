@@ -77,6 +77,16 @@ for (const generateWiki of [false,true]) {
     check(preset.instances.some(i=>i.ref===b.trigger.instanceRef),"preset trigger exists");
   }
 }
+// Normative design fixture only: current static processors are tested separately.
+// This does not claim a generic third-party plugin admission gate exists.
+function contextBodyFormat(purpose: "context"|"raw"|"metadata"|"index"|"other", kind:string, path:string):boolean {
+  return purpose!=="context" || !["memory","rule","experience","knowledge"].includes(kind) || /\.md$/i.test(path);
+}
+for (const kind of ["memory","rule","experience","knowledge"]) {
+  check(contextBodyFormat("context",kind,"body.md"),"context Markdown body permitted");
+  check(!contextBodyFormat("context",kind,"body.json"),"JSON cannot substitute for a context Markdown body");
+}
+for (const [purpose,kind,path] of [["raw","memory","raw.json"],["metadata","memory","metadata.json"],["index","knowledge","vectors.bin"],["other","website","index.html"],["other","video","clip.mp4"]] as const) check(contextBodyFormat(purpose,kind,path),"other artifacts retain appropriate formats");
 // Type failures are expected constraints, not app behavior tests.
 // @ts-expect-error Binding may not override instance execution.
 const duplicateAuthority: Binding = {...config.bindings[0], placement: embed1.execution};

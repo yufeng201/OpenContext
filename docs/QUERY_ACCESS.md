@@ -4,7 +4,7 @@
 
 ## API真相源
 
-共享路径在packages/contracts/src/query-api.ts；请求校验仍来自同一TypeBox SearchSchema/ReadSchema。`GET /api/openapi.json`提供OpenAPI3.1的查询子集：projects、tree、search、read。该元数据公开但不含文件或凭据。管理mutation、完整response schema和稳定外部版本兼容承诺仍未交付，不能把子集当成完整管理API。
+共享路径在packages/contracts/src/query-api.ts；请求校验仍来自同一TypeBox SearchSchema/ReadSchema。`GET /api/openapi.json`提供OpenAPI3.1的查询子集：projects、tree、search、read。该元数据公开但不含文件或凭据。查询成功/错误响应已有共享TypeBox运行时校验；管理mutation、完整管理SDK和稳定外部版本兼容承诺仍未交付，不能把子集当成完整管理API。
 
 REST使用Authorization Bearer。树只包含当前有效文件；read必须给精确fileId和revisionId。历史revision依然受当前project/source权限，来源撤权不是改读最新版。服务器的当前授权为准，SDK没有第二套授权缓存。
 
@@ -25,15 +25,17 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 ## TypeScript源码SDK
 
-`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是仓库内私有源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect并默认限时15秒；timeoutMs可在10–15000毫秒内缩短。解码响应上限16MiB，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
+`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。HTTP200 read成功响应的编码JSON上限112MiB，其他查询和错误响应仍为16MiB（maxResponseBytes默认112MiB，可收紧至128字节；实际按操作取较小上限）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
 
-方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。查询正文响应目前是TS契约断言，尚无客户端运行时response schema校验；readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
+成功状态只接受200；readiness额外接受503依赖诊断报告且仍用16MiB预算。其他2xx和3xx在读取正文/获取reader前返回INVALID_RESPONSE并取消响应体；HTTP4xx/5xx只按16MiB错误预算读安全envelope。伪造/缺失content-length不放宽实际流字节限制；真实重定向因redirect:error返回REQUEST_FAILED且不跟随目标。
+
+方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)、filesPage(projectId,{limit,cursor})。所有方法最后可传{signal}。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。成功响应、错误、分页和固定revision共享TypeBox schema，额外字段/未知形状拒绝而非静默丢弃；全文read复核正文UTF-8长度和SHA256；有限读取复核disclosure返回字节及textHash（完整文件hash保持在citation中），citation必须与文件/所请求revision一致。readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 
 可执行合成示例及REST/SDK/MCP一致性、跨project/历史/revoke测试在tests/integration/query-access.test.ts；它们不调用模型。
 
 ## MCP / Codex / Claude Code
 
-已有HTTP MCP入口为/mcp，工具context_search/context_read/context_tree；与REST使用相同服务门禁。最小权限token、显式project scope及Codex配置说明见[快速开始](QUICKSTART.md)。手工配置会写用户客户端配置，应由用户明确选择目标；本实现不会自动执行。Claude真实客户端、模型跨会话自主调用和真实回答尚未验收，不能以协议测试代替。
+已有HTTP MCP入口为/mcp，工具context_search/context_read/context_tree；与REST使用相同服务门禁。当前每个POST只支持一个JSON-RPC消息；数组batch（即使只有一条、或夹带initialize/通知）在认证后、创建transport/执行工具前整包拒绝：HTTP400，JSON-RPC -32600、id=null、固定message MCP_BATCH_UNSUPPORTED，无工具执行/成功审计，不回显成员ID/正文。底层SDK此前接受batch是未承诺的能力，依赖此行为的调用者必须逐个发送消息；单独initialize、通知和工具调用保持。单工具编码预算不能用来宣称batch总量受控；本实现不接受batch，也没有并发请求聚合SLO承诺。最小权限token、显式project scope及Codex配置说明见[快速开始](QUICKSTART.md)。手工配置会写用户客户端配置，应由用户明确选择目标；本实现不会自动执行。Claude真实客户端、模型跨会话自主调用和真实回答尚未验收，不能以协议测试代替。
 
 可选hook/recall skill安装器尚未提供，默认不配置hook。主动JSON Session导入见[Session指南](SESSION_IMPORT.md)，不等同自动历史读取或模型认证。
 
@@ -42,3 +44,45 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 401 UNAUTHORIZED：token缺失/撤销。403 FORBIDDEN：reader访问其他project或写入口。404 NOT_FOUND：文件/revision不可见，或binding已撤销。400 INVALID_SCHEMA：请求字段/类型不符合共享schema。SDK/CLI不自动扩大scope、重新认证、降级成owner或改读head。索引freshness不是授权依据。
 
 health只代表存活；owner-only readiness检查依赖并在503时输出脱敏JSON、CLI非零退出。离线维护见[备份恢复与诊断](BACKUP_RECOVERY.md)；重启、备份、迁移和安全门槛见[产品就绪矩阵](PRODUCT_READINESS.md)。当前不支持多租户企业生产部署。
+
+search的limit是最多命中数，另受4096字符总excerpt预算（每项最多512）约束，可能少于limit；这不是漏检或分页总量。固定全文需用命中revision再次read。
+
+## 固定快照文件分页与可执行例子
+
+`GET /api/projects/:id/files?limit=100&cursor=...`、SDK `filesPage`、CLI `files PROJECT [LIMIT] [CURSOR]` 和 MCP `context_tree({projectId,limit,cursor})` 共用当前授权与页契约。limit为1–200，默认100，nextCursor为null表示结束；不返回未授权总量。原tree数组/MCP不传分页参数的files对象保持兼容。旧tree拒绝未知query字段，不静默忽略cursor。
+
+游标只表示当前已授权文件集合的读取位置，不是凭据。游标绑定project、head和可见文件集合指纹；来源撤权/发布/head变化令旧游标返回409 CURSOR_STALE，调用方显式从第一页重取。跨project仍先执行当前授权；篡改/无效游标报400 INVALID_CURSOR。不能保证跨写入的长寿命分页快照，不自动改读新的head。
+
+如下命令真正启动合成loopback协议服务、无真实凭据/来源/模型，并清理自有临时服务：
+
+```sh
+pnpm exec vitest run tests/integration/query-response.test.ts tests/integration/query-access.test.ts packages/mcp/tests/query-pagination.test.ts
+```
+
+覆盖REST/TS SDK/CLI/真实MCP SDK分页及固定读取一致性、发布/撤源游标失效、撤token、超时取消与错误脱敏。SDK支持等级为Node24只读源码预览，不提供管理写方法、Python包、OAuth、用户Agent自动配置或生产版本稳定承诺。
+
+请求body/query和响应中的额外字段明确拒绝。JSON错误、错误media type、无效UTF-8、协议字段/固定revision错误均只暴露稳定码，不回显原正文/URL/abort reason。CLI收到SIGINT/SIGTERM取消；SDK非合作transport也有deadline竞争和晚到响应体清理。网络断开不会成为对同步native代码的抢占式终止保证。
+
+正文与传输预算分开：UTF-8正文/存储对象最多16MiB；read编码JSON最多112MiB（6×16MiB最坏JSON转义 + 16MiB编码metadata余量）；MCP read的text+structuredContent工具结果最多256MiB+1024字节（13×16MiB正文重复/再次转义 + 3×16MiB metadata + 包装余量）。共享read校验还分别检查正文与metadata。实际文本未重复计入正文上限。其他查询/错误响应的16MiB预算保持。SDK/CLI默认预算覆盖以上16MiB内合法UTF-8全文，Web/REST/MCP使用相同正文与metadata契约；自定义maxResponseBytes只收紧，不扩大操作上限。旧16MiB ASCII及8MiB引号不会仅因JSON编码成本被拒绝。
+
+正文超限返回413 BYTE_LIMIT（MCP为同码协议错误）；编码预算超限为RESPONSE_TOO_LARGE（服务端503，SDK本地拒绝保留所见HTTP状态）。不返回截断成功结果。maxBytes/offsetBytes用于上限内对象的按需读取；超过16MiB的对象即使请求片段也拒绝，不能靠分页绕过对象读上限。客户端主动收紧预算、8192次读取工作量或15秒期限也会拒绝合法大响应，调用方可改用有限选择器，不能承诺任意慢网络/碎片化transport成功。传输上限是有限编码预算，不是整个进程峰值内存上限或并发SLO。JSON-RPC请求另有上限。搜索limit仍只是最多命中数，4096 excerpt预算和默认10条保持，不能当总数/搜索分页；本批分页仅限文件集合，projects/search分页尚未提供。
+
+明确的来源历史read保留现有授权语义：来源已删除但binding仍获授权时，固定历史内容可读，其metadata可保留tombstone/invalid；不把freshness当授权凭据。树/搜索仍排除这些条目，无效派生产物及撤源后的历史均拒绝。SDK的schema例外只接纳服务器授权后返回的明确来源历史，不能代替服务器ACL。
+
+SDK整请求使用单调时钟的绝对期限（默认15秒，配置10–15000ms），覆盖transport、headers/body、解码/JSON/schema/citation/readiness和固定正文SHA256；每阶段结束与返回前复验，同步处理过期不能返回成功。单个请求最多8192次body读取（含空chunk/EOF），超限为RESPONSE_WORK_LIMIT；空chunk不保留，自有分段最多64KiB，每64次读取让出事件循环。超过碎片工作预算也会拒绝有效JSON，不能当字节截断或自动retry。同步transport throw、异步reject都稳定转换为REQUEST_FAILED，CLI按共享错误白名单输出。详情及可执行边界测试见[SDK包说明](../packages/http-client/README.md)。
+
+SDK错误始终是新建闭合对象，CLI另行投影metadata：只保留有限白名单code、0或100–599整数status与合法36字符UUID；不信任外部同类Error的message、name、correlationId、cause/details或stack，不执行错误getter/prototype检查。受审平台code和合法UUID保留，原始诊断不进入SDK/CLI输出。相邻getter/proxy/构造测试为 `tests/integration/error-projection.test.ts`。
+
+## 默认先有限披露
+
+新Agent接入先分页发现文件和搜索短片段；对于Markdown，先`context_read`传`outline: true, maxBytes: 4096`取得确定性标题目录，再按行/章节读取8KiB以内片段，必要时用offset续读及追溯原件。固定revision不能省略。全文是显式选择；旧客户端全文行为仍兼容。参数、片段hash与全文hash区别、Reader入口及16MiB对象预检见[渐进披露契约](PROGRESSIVE_CONTEXT.md)。这不是已认证模型自主调用验收。
+
+## 跨请求正文读取准入
+
+REST read、MCP read及grep实际读正文共享每个应用实例的准入，位于当前project/source/revision授权之后、存储正文分配之前。无新选择器的全文且对象≥1MiB，或FileEntry编码metadata≥1MiB，归为重请求；全局最多1个重读（因此每空间也至多1个）。8KiB默认/最多64KiB片段、标题目录及较小全文使用独立轻量通道：全局4个、每空间2个；巨大metadata不能靠小正文选择器绕开重通道。重读不会消耗轻量名额。没有排队，没有自动重试。
+
+每个HTTP请求只计一次，grep从小对象转入大对象时在大正文分配前原子升级且不降级。许可持有到响应finish/close，涵盖JSON/MCP序列化及网络背压，而非读取磁盘后立即释放。超额在读正文前返回RESOURCE_BUSY：REST429加Retry-After:1；MCP仍按JSON-RPC返回同码错误（HTTP200协议外壳），不返回截断正文或扩大权限。调用方可退避后显式重试；Retry-After不是1秒后一定成功的容量承诺。
+
+响应许可默认15秒，从首次准入开始，不因重复服务读取续期；内部服务器配置readResponseTimeoutMs仅允许10–15000ms收紧，客户端不能指定。客户端abort、响应close/error或停服会终止并释放；期限到达先destroy响应再释放，已开始写入时可能体现为连接中断/SDK REQUEST_FAILED或TIMEOUT，而不是可解析JSON错误。单调时钟检查配合timer；同步CPU/FS/SQLite不能被强抢占，计时器在event loop恢复后才能运行。
+
+受控1MiB NUL小规模测量确认未保护时两个并发MCP全文都读正文并保留大响应；保护后只执行一个，另一个RESOURCE_BUSY；暂停大响应时64字节片段仍200并完成。测量使用最多3请求/两个自有Node进程和heap/RSS/期限保护，不把这次样本外推成16MiB实际峰值、生产吞吐或并发SLO。16MiB NUL每个MCP结果仅编码正文就约208MiB，服务端有多份中间值，许可计数不是OS/RSS配额；启动heap/磁盘检查也不保证峰值内存。分段仍先读/hash整个≤16MiB对象，低成本指有限返回体。未覆盖其他HTTP入口的全局速率或多实例聚合配额。实现测试见tests/integration/read-admission.test.ts与read-admission-http.test.ts。

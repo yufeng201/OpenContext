@@ -11,6 +11,9 @@
 - [插件开发](PLUGIN_DEVELOPMENT.md)：当前静态可信 connector/processor 注册与锁定机制，区别实际接口和八类目标。
 - [实施状态](IMPLEMENTATION_STATUS.md)：实现事实与未实现项；协议连通不等于模型自主调用通过。
 - [开发指南](DEVELOPMENT.md)：工程检查、测试与贡献流程。
+- [离线 live 验收 gate](LIVE_GATE.md)：脱敏调用证据、固定版本/hash/引用关联与失败拒绝；合成通过不代表真实模型通过。
+
+上下文与记忆以 Markdown 正文及渐进披露为核心；原始材料保持原格式。当前可按固定版本读取行/章节并限定字节预算，见[Markdown 上下文与渐进披露](PROGRESSIVE_CONTEXT.md)。
 
 ## 产品设计
 
@@ -45,3 +48,5 @@ PRD AC-01–AC-22、用户流程 UJ-01–UJ-13 仍是待实现的应用验收。
 本批连接器出站默认策略、真实合成TLS/Git实验与可修改审计基础见[出站与审计](EGRESS_AUDIT.md)；下一阶段一页提案见[团队身份决策](TEAM_IDENTITY_DECISION.md)。
 
 关键写入审计持久性、重试/队列与owner故障恢复见[事务审计](AUDIT_DURABILITY.md)。
+
+单机版本兼容、显式新目录升级/隔离回滚、短负载与生产门禁见[可执行操作指南](PRODUCTION_RUNBOOK.md)。

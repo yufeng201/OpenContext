@@ -1,5 +1,6 @@
 import type {
   Capability,
+  PluginProbeResult,
   PluginManifest,
   PluginInstance,
   PluginField,
@@ -23,15 +24,14 @@ export type ExecutionContext = {
 };
 export interface OfficialPlugin<I, O> {
   manifest: PluginManifest;
-  probe(): {
-    available: boolean;
-    capabilities: Capability[];
-    limitations: string[];
-  };
+  probe(): PluginProbeResult;
   invoke(input: I, context: ExecutionContext): Promise<O>;
 }
 
-export type ConfigurationContext = { allowedLocalRepoRoot?: string };
+export type ConfigurationContext = {
+  allowedLocalRepoRoot?: string;
+  signal?: AbortSignal;
+};
 type DefinitionMetadata = {
   manifest: PluginManifest;
   /** Reviewed local source/build files. The registry hashes bytes, not package names. */
@@ -42,11 +42,7 @@ type DefinitionMetadata = {
   fields: PluginField[];
   acceptsImports: boolean;
   recommendedProcessorRef?: string;
-  probe(): {
-    available: boolean;
-    capabilities: Capability[];
-    limitations: string[];
-  };
+  probe(): PluginProbeResult;
   validateConfig?(
     config: Record<string, unknown>,
     context: ConfigurationContext,
@@ -55,6 +51,7 @@ type DefinitionMetadata = {
   validateImport?(
     content: string,
     config: Record<string, unknown>,
+    context?: { signal: AbortSignal },
   ): void | Promise<void>;
 };
 export type ConnectorDefinition = DefinitionMetadata & {

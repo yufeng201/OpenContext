@@ -66,7 +66,7 @@ async function fixture() {
       file,
       text,
       citation: {
-        uri: `oc://project/${projectId}/file/${fileId}@${revisionId}`,
+        uri: `oc://space/${projectId}/file/${fileId}@${revisionId}`,
         projectId,
         fileId,
         revisionId,
@@ -148,6 +148,21 @@ async function fixture() {
 }
 
 describe('authenticated stateless MCP over real loopback HTTP', () => {
+  it('rejects a legacy read handler that silently ignores an opt-in body budget', async () => {
+    const f = await fixture();
+    await expect(
+      f.client.callTool({
+        name: 'context_read',
+        arguments: {
+          projectId: 'p1',
+          fileId: f.file.fileId,
+          revisionId: f.file.revisionId,
+          maxBytes: 4,
+        },
+      }),
+    ).rejects.toThrow('INVALID_RESPONSE');
+  });
+
   it('initializes, lists TypeBox tools, searches then reads a matching fixed citation', async () => {
     const f = await fixture();
     const tools = await f.client.listTools();

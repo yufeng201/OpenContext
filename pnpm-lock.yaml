@@ -165,6 +165,9 @@ importers:
       '@opencontext/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
 
   packages/mcp:
     dependencies:
@@ -223,6 +226,18 @@ importers:
       '@opencontext/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  plugins/example-notes:
+    dependencies:
+      '@opencontext/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@opencontext/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
 
   plugins/feishu-chat:
     dependencies:

@@ -70,6 +70,18 @@ export function errorText(error: unknown): string {
       return '此同名导出已被其他操作更新。列表已刷新，请重新选择文件并确认后上传；不会自动覆盖。 (IMPORT_CONFLICT)';
     if (error.code === 'BINDING_REVOKED')
       return '此来源已撤销，不能继续同步或加工；如需重新授权，请添加新来源。 (BINDING_REVOKED)';
+    const importRecovery: Record<string, string> = {
+      PROJECT_SCOPE_MISMATCH:
+        '导出文件的 projectScope 与此来源配置不一致。请选择匹配的导出，或新建正确 scope 的来源；不要修改正文伪装项目归属。',
+      INVALID_SESSION:
+        '此文件不是当前来源支持的 versioned Session JSON。请检查 Codex/Claude 来源类型并选择对应的完整导出。',
+      PARTIAL_SESSION:
+        '导出不完整，未保存输入。请重新选择已结束且完整的会话导出；不要仅修改 complete 声明。',
+      UNSUPPORTED_SESSION_CONTENT:
+        '导出包含当前适配器不支持的内容，未保存输入。请查看 Session 导入格式说明，不要删事件后冒称完整。',
+    };
+    if (importRecovery[error.code])
+      return `${importRecovery[error.code]} (${error.code}${error.correlationId ? ` · ${error.correlationId}` : ''})`;
     const explanations: Record<number, string> = {
       400: '输入未通过服务器校验，请检查字段。',
       401: '凭据无效或会话已过期，请重新连接。',

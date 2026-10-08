@@ -295,6 +295,8 @@ describe('explicit session candidate processor', () => {
     ).toBe(true);
     for (const output of result.outputs) {
       expect(output.relativePath).toMatch(/^candidates\/[a-f0-9]{64}\.md$/);
+      for (const heading of ['## Status', '## Provenance', '## Content'])
+        expect(output.content).toContain(heading);
       expect(output.content).toContain(
         'oc://space/project-1/file/message-file@revision-message-file',
       );

@@ -29,8 +29,12 @@
     "docs:preview": "node scripts/preview-docs.ts",
     "admin": "node scripts/admin.ts",
     "drill:restore": "node scripts/restore-drill.ts",
+    "drill:upgrade": "node scripts/upgrade-drill.ts",
+    "drill:load": "node scripts/load-drill.ts",
     "preflight": "node scripts/preflight.ts",
-    "drill:deploy": "node scripts/deployment-drill.ts"
+    "drill:deploy": "node scripts/deployment-drill.ts",
+    "release:build": "pnpm build && node scripts/package-release.ts",
+    "release:archive": "node scripts/release-archive.ts"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",

@@ -61,6 +61,8 @@ pnpm start
 
 不需要先配置 embedding 或模型来完成这些步骤。“生成 Markdown 导航”不会使用 Codex/Claude，也不会消耗模型额度。
 
+新空间默认空文件页可直接点击“新增数据源”。Markdown Reader默认有限读取，可用章节目录定位、续读及显式全文，见[渐进披露](PROGRESSIVE_CONTEXT.md)。
+
 也可从[Session主动导入](SESSION_IMPORT.md)选择Codex/Claude来源，填写`synthetic-project`并上传仓库合成fixture，验证raw→归一化→显式标记候选→共同召回。这是用户选择的versioned JSON文件导入，不会扫描电脑或运行coding CLI；候选处理器没有模型兜底。两条来源路径共用平台任务、文件发布和检索门禁。
 
 ## 4. 给日常 Agent 配置只读 MCP

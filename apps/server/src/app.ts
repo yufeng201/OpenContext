@@ -1,3 +1,14 @@
+import {
+  ReadQuerySchema,
+  parseReadQuery,
+} from '@opencontext/contracts/query-api';
+import { disclose } from './disclosure.ts';
+import { ReadAdmission } from './read-admission.ts';
+import type { ReadOptions } from '@opencontext/contracts';
+import {
+  CURRENT_STORAGE_VERSION,
+  APPLICATION_COMPATIBILITY,
+} from '@opencontext/contracts/maintenance';
 import { AuditDispatcher } from './audit-dispatcher.ts';
 import type { AuditContext } from '@opencontext/contracts/audit';
 import { auditEvent, auditAction } from './audit.ts';
@@ -10,9 +21,20 @@ import {
   assertCompleteRoot,
   inspectStorage,
 } from '@opencontext/state-sqlite/maintenance';
-import { QueryRoutes, QueryOpenApi } from '@opencontext/contracts/query-api';
-import Fastify, { type FastifyRequest } from 'fastify';
-import { randomUUID } from 'node:crypto';
+import { pageFiles } from './query-pages.ts';
+import {
+  QueryRoutes,
+  QueryOpenApi,
+  parseQueryResponse,
+  ProjectsSchema,
+  TreeSchema,
+  FilePageSchema,
+  FilePageQuerySchema,
+  EmptyQuerySchema,
+  type FilePageInput,
+} from '@opencontext/contracts/query-api';
+import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
+import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname } from 'node:path';
 import {
@@ -20,7 +42,8 @@ import {
   CreateBindingSchema,
   SearchSchema,
   LoginSchema,
-  ReadSchema,
+  ReadResultSchema,
+  SearchResultSchema,
   MAX_AUTH_TOKEN_LENGTH,
   CreatePluginBindingSchema,
   ImportUploadSchema,
@@ -34,7 +57,7 @@ import type {
   ImportUploadInput,
 } from '@opencontext/contracts';
 import { Catalog } from '@opencontext/state-sqlite';
-import { FileStore } from '@opencontext/storage-fs';
+import { FileStore, MAX_TEXT_READ_BYTES } from '@opencontext/storage-fs';
 import { search } from '@opencontext/retrieval';
 import { registerMcp } from '@opencontext/mcp';
 import { Coordinator } from './coordinator.ts';
@@ -57,6 +80,8 @@ export type ApplicationOptions = {
   autoStart?: boolean;
   /** Server-owned deadline; clients cannot choose resource budgets. */
   connectionTestTimeoutMs?: number;
+  /** Server-owned read response lifetime; only tightening 10–15000ms is allowed. */
+  readResponseTimeoutMs?: number;
   registry?: StaticRegistry;
   /** Reviewed server-side dependency injection; never accepted by a client body. */
   feishu?: Omit<FeishuChatOptions, 'stateRoot'>;
@@ -157,6 +182,8 @@ export function createApplication(options: ApplicationOptions) {
     requestIdHeader: false,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
+  const readAdmission = new ReadAdmission(options.readResponseTimeoutMs);
+  const currentRequests = new WeakMap<Principal, FastifyRequest>();
   const currentCredentials = new WeakMap<Principal, string>();
   const requestPrincipals = new WeakMap<FastifyRequest, Principal>();
   const requestCodes = new WeakMap<FastifyRequest, string>();
@@ -217,6 +244,7 @@ export function createApplication(options: ApplicationOptions) {
       principal = catalog.authenticate(token, options.ownerToken);
     if (!principal) throw new Error('UNAUTHORIZED');
     currentCredentials.set(principal, token);
+    currentRequests.set(principal, request);
     requestPrincipals.set(request, principal);
     return principal;
   }
@@ -289,6 +317,7 @@ export function createApplication(options: ApplicationOptions) {
       projectId: string,
       fileId: string,
       revisionId: string,
+      options: ReadOptions = {},
     ): ReadResult {
       authorize(principal, projectId);
       const currentFiles = new Map(
@@ -343,11 +372,18 @@ export function createApplication(options: ApplicationOptions) {
           ? catalog.head(projectId)
           : catalog.getRevisionCommit(projectId, fileId, revisionId);
       if (!commitId) throw new Error('NOT_FOUND');
+      if (file.bytes > MAX_TEXT_READ_BYTES) throw new Error('BYTE_LIMIT');
+      const request = currentRequests.get(principal);
+      if (!request) throw new Error('UNAUTHORIZED');
+      readAdmission.acquire(request, projectId, file, options);
       const text = store.readText(file.contentHash);
+      if (createHash('sha256').update(text).digest('hex') !== file.contentHash)
+        throw new Error('CORRUPT_OBJECT');
       authorize(principal, projectId);
+      readAdmission.check(request);
       return {
         file,
-        text,
+        ...disclose(text, file.logicalPath, options),
         citation: {
           uri: 'oc://space/' + projectId + '/file/' + fileId + '@' + revisionId,
           projectId,
@@ -386,7 +422,8 @@ export function createApplication(options: ApplicationOptions) {
       );
     },
   };
-  app.addHook('onRequest', (request, _reply, done) => {
+  app.addHook('onRequest', (request, reply, done) => {
+    readAdmission.bind(request, reply);
     const host = request.headers.host ?? '';
     let hostname: string;
     try {
@@ -422,6 +459,7 @@ export function createApplication(options: ApplicationOptions) {
     done();
   });
   app.addHook('onResponse', (request, reply, done) => {
+    readAdmission.release(request);
     const route = request.routeOptions.url ?? '';
     if (
       !criticalRequests.has(request) &&
@@ -474,56 +512,66 @@ export function createApplication(options: ApplicationOptions) {
               ? 'INVALID_SCHEMA'
               : safeErrorCode(error);
     requestCodes.set(request, code);
+    if (code === 'RESOURCE_BUSY') reply.header('Retry-After', '1');
     const status =
-      code === 'UNSUPPORTED_MEDIA_TYPE'
-        ? 415
-        : code === 'PAYLOAD_TOO_LARGE'
-          ? 413
-          : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
-            ? 429
-            : [
-                  'CONNECTION_TEST_TIMEOUT',
-                  'AUDIT_QUEUE_FULL',
-                  'AUDIT_UNAVAILABLE',
-                ].includes(code)
-              ? 503
-              : code === 'UNAUTHORIZED'
-                ? 401
-                : ['FORBIDDEN', 'UNTRUSTED_HOST', 'UNTRUSTED_ORIGIN'].includes(
-                      code,
-                    )
-                  ? 403
-                  : code === 'NOT_FOUND'
-                    ? 404
-                    : [
-                          'HEAD_MOVED',
-                          'OUTPUT_CONFLICT',
-                          'LEASE_LOST',
-                          'BINDING_REVOKED',
-                          'IMPORT_CONFLICT',
-                          'INPUT_CHANGED',
-                          'PLUGIN_LOCK_MISMATCH',
-                          'PLUGIN_ARTIFACT_CHANGED',
-                        ].includes(code)
-                      ? 409
-                      : code === 'INVALID_SCHEMA' ||
-                          /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
-                            code,
-                          ) ||
-                          code.startsWith('INVALID_') ||
-                          [
-                            'IMPORT_LIMIT',
-                            'IMPORTS_NOT_SUPPORTED',
-                            'PLUGIN_NOT_FOUND',
-                            'UNKNOWN_PLUGIN',
-                            'PLUGIN_CAPABILITY_MISMATCH',
-                            'CAPABILITY_OR_INSTANCE_MISMATCH',
-                            'CAPABILITY_MISSING',
-                            'PLUGIN_UNAVAILABLE',
-                            'CONNECTION_TEST_UNSUPPORTED',
+      code === 'INVALID_RESPONSE'
+        ? 500
+        : code === 'RESPONSE_TOO_LARGE'
+          ? 503
+          : code === 'CURSOR_STALE'
+            ? 409
+            : code === 'UNSUPPORTED_MEDIA_TYPE'
+              ? 415
+              : code === 'PAYLOAD_TOO_LARGE' || code === 'BYTE_LIMIT'
+                ? 413
+                : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
+                  ? 429
+                  : [
+                        'CONNECTION_TEST_TIMEOUT',
+                        'PLUGIN_TIMEOUT',
+                        'AUDIT_QUEUE_FULL',
+                        'AUDIT_UNAVAILABLE',
+                      ].includes(code)
+                    ? 503
+                    : code === 'UNAUTHORIZED'
+                      ? 401
+                      : [
+                            'FORBIDDEN',
+                            'UNTRUSTED_HOST',
+                            'UNTRUSTED_ORIGIN',
                           ].includes(code)
-                        ? 400
-                        : 500;
+                        ? 403
+                        : code === 'NOT_FOUND'
+                          ? 404
+                          : [
+                                'HEAD_MOVED',
+                                'OUTPUT_CONFLICT',
+                                'LEASE_LOST',
+                                'BINDING_REVOKED',
+                                'IMPORT_CONFLICT',
+                                'INPUT_CHANGED',
+                                'PLUGIN_LOCK_MISMATCH',
+                                'PLUGIN_ARTIFACT_CHANGED',
+                              ].includes(code)
+                            ? 409
+                            : code === 'INVALID_SCHEMA' ||
+                                /^(PARTIAL_|UNSUPPORTED_|EMPTY_|DUPLICATE_|PROJECT_SCOPE_|SESSION_ID_|SECRET_)/.test(
+                                  code,
+                                ) ||
+                                code.startsWith('INVALID_') ||
+                                [
+                                  'IMPORT_LIMIT',
+                                  'IMPORTS_NOT_SUPPORTED',
+                                  'PLUGIN_NOT_FOUND',
+                                  'UNKNOWN_PLUGIN',
+                                  'PLUGIN_CAPABILITY_MISMATCH',
+                                  'CAPABILITY_OR_INSTANCE_MISMATCH',
+                                  'CAPABILITY_MISSING',
+                                  'PLUGIN_UNAVAILABLE',
+                                  'CONNECTION_TEST_UNSUPPORTED',
+                                ].includes(code)
+                              ? 400
+                              : 500;
     void reply.code(status).send({
       error: {
         code,
@@ -534,7 +582,11 @@ export function createApplication(options: ApplicationOptions) {
     });
   });
   app.get('/api/openapi.json', () => QueryOpenApi);
-  app.get('/api/health', () => ({ status: 'ok', schemaVersion: 1 }));
+  app.get('/api/health', () => ({
+    status: 'ok',
+    schemaVersion: CURRENT_STORAGE_VERSION,
+    applicationCompatibility: APPLICATION_COMPATIBILITY,
+  }));
   app.get('/api/readiness', (request, reply) => {
     authorize(authenticate(request), undefined, true);
     const result = inspectStorage(options.dataRoot, catalog.db);
@@ -589,8 +641,14 @@ export function createApplication(options: ApplicationOptions) {
     );
     return { ok: true };
   });
-  app.get(QueryRoutes.projects, (request) =>
-    services.projects(authenticate(request)),
+  app.get(
+    QueryRoutes.projects,
+    { schema: { querystring: EmptyQuerySchema } },
+    (request) =>
+      parseQueryResponse(
+        ProjectsSchema,
+        services.projects(authenticate(request)),
+      ),
   );
   app.post<{ Body: { name: string } }>(
     QueryRoutes.projects,
@@ -604,6 +662,26 @@ export function createApplication(options: ApplicationOptions) {
       return project;
     },
   );
+  function requestCancellation(request: FastifyRequest, reply: FastifyReply) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => {
+      if (!reply.raw.writableFinished) abort();
+    };
+    request.raw.once('aborted', abort);
+    reply.raw.once('close', close);
+    if (request.raw.aborted || reply.raw.destroyed) abort();
+    return {
+      signal: controller.signal,
+      assertActive() {
+        if (controller.signal.aborted) throw new Error('CANCELLED');
+      },
+      dispose() {
+        request.raw.off('aborted', abort);
+        reply.raw.off('close', close);
+      },
+    };
+  }
   type ProjectParams = { id: string };
   type BindingParams = { id: string; bindingId: string };
   app.get('/api/plugins', (request) => {
@@ -630,35 +708,45 @@ export function createApplication(options: ApplicationOptions) {
         body: Type.Union([CreateBindingSchema, CreatePluginBindingSchema]),
       },
     },
-    async (request) => {
-      authorize(authenticate(request), request.params.id, true);
-      const selection = bindingSelection(request.body);
-      const context = options.allowedLocalRepoRoot
-        ? { allowedLocalRepoRoot: options.allowedLocalRepoRoot }
-        : {};
-      const connector = await registry.prepare(
-        selection.connector,
-        'connector',
-        context,
-      );
-      const processor = await registry.prepare(
-        selection.processor,
-        'processor',
-        context,
-      );
-      const created = critical(request, (context) =>
-        catalog.createBinding(
-          request.params.id,
-          {
-            name: selection.name,
-            connector,
-            processor,
-          },
+    async (request, reply) => {
+      const cancellation = requestCancellation(request, reply);
+      try {
+        authorize(authenticate(request), request.params.id, true);
+        const selection = bindingSelection(request.body);
+        const context = options.allowedLocalRepoRoot
+          ? {
+              allowedLocalRepoRoot: options.allowedLocalRepoRoot,
+              signal: cancellation.signal,
+            }
+          : { signal: cancellation.signal };
+        const connector = await registry.prepare(
+          selection.connector,
+          'connector',
           context,
-        ),
-      );
-      requestTargets.set(request, { bindingId: created.id });
-      return created;
+        );
+        const processor = await registry.prepare(
+          selection.processor,
+          'processor',
+          context,
+        );
+        cancellation.assertActive();
+        authorize(authenticate(request), request.params.id, true);
+        const created = critical(request, (context) =>
+          catalog.createBinding(
+            request.params.id,
+            {
+              name: selection.name,
+              connector,
+              processor,
+            },
+            context,
+          ),
+        );
+        requestTargets.set(request, { bindingId: created.id });
+        return created;
+      } finally {
+        cancellation.dispose();
+      }
     },
   );
   function bindingGate(request: FastifyRequest<{ Params: BindingParams }>) {
@@ -713,48 +801,58 @@ export function createApplication(options: ApplicationOptions) {
   app.post<{ Params: BindingParams; Body: ImportUploadInput }>(
     '/api/projects/:id/bindings/:bindingId/imports',
     { bodyLimit: 2_105_344, schema: { body: ImportUploadSchema } },
-    async (request) => {
-      const binding = bindingGate(request);
-      if (!binding.active) throw new Error('BINDING_REVOKED');
-      if (
-        !binding.connector ||
-        !registry.resolve(binding.connector, 'connector').acceptsImports
-      )
-        throw new Error('IMPORTS_NOT_SUPPORTED');
-      if (Buffer.byteLength(request.body.content) > 1_048_576)
-        throw new Error('PAYLOAD_TOO_LARGE');
+    async (request, reply) => {
+      const cancellation = requestCancellation(request, reply);
       try {
-        JSON.parse(request.body.content);
-      } catch {
-        throw new Error('INVALID_JSON');
+        const binding = bindingGate(request);
+        if (!binding.active) throw new Error('BINDING_REVOKED');
+        if (
+          !binding.connector ||
+          !registry.resolve(binding.connector, 'connector').acceptsImports
+        )
+          throw new Error('IMPORTS_NOT_SUPPORTED');
+        if (Buffer.byteLength(request.body.content) > 1_048_576)
+          throw new Error('PAYLOAD_TOO_LARGE');
+        try {
+          JSON.parse(request.body.content);
+        } catch {
+          throw new Error('INVALID_JSON');
+        }
+        try {
+          await registry.validateImport(
+            binding.connector,
+            request.body.content,
+            { signal: cancellation.signal },
+          );
+        } catch (error) {
+          const code = safeErrorCode(error, 'INVALID_IMPORT');
+          // Do not retain arbitrary native-plugin diagnostics containing imported
+          // text or credentials in the HTTP error chain; expose only a stable code.
+          // eslint-disable-next-line preserve-caught-error
+          throw new Error(code);
+        }
+        cancellation.assertActive();
+        bindingGate(request);
+        if (!catalog.getBinding(binding.id)?.active)
+          throw new Error('BINDING_REVOKED');
+        const object = store.putText(request.body.content);
+        const imported = critical(request, (context) =>
+          catalog.putImport(
+            binding.id,
+            {
+              id: randomUUID(),
+              filename: request.body.filename,
+              ...object,
+            },
+            request.body.expectedObjectId ?? null,
+            context,
+          ),
+        );
+        requestTargets.set(request, { objectId: imported.id });
+        return imported;
+      } finally {
+        cancellation.dispose();
       }
-      try {
-        await registry.validateImport(binding.connector, request.body.content);
-      } catch (error) {
-        const code = safeErrorCode(error, 'INVALID_IMPORT');
-        // Do not retain arbitrary native-plugin diagnostics containing imported
-        // text or credentials in the HTTP error chain; expose only a stable code.
-        // eslint-disable-next-line preserve-caught-error
-        throw new Error(code);
-      }
-      bindingGate(request);
-      if (!catalog.getBinding(binding.id)?.active)
-        throw new Error('BINDING_REVOKED');
-      const object = store.putText(request.body.content);
-      const imported = critical(request, (context) =>
-        catalog.putImport(
-          binding.id,
-          {
-            id: randomUUID(),
-            filename: request.body.filename,
-            ...object,
-          },
-          request.body.expectedObjectId ?? null,
-          context,
-        ),
-      );
-      requestTargets.set(request, { objectId: imported.id });
-      return imported;
     },
   );
   app.delete<{ Params: BindingParams & { objectId: string } }>(
@@ -805,25 +903,68 @@ export function createApplication(options: ApplicationOptions) {
           catalog.getBinding(run.bindingId)?.active,
       );
   });
-  app.get<{ Params: ProjectParams }>(QueryRoutes.tree, (request) =>
-    services.tree(authenticate(request), request.params.id),
+  app.get<{ Params: ProjectParams }>(
+    QueryRoutes.tree,
+    { schema: { querystring: EmptyQuerySchema } },
+    (request) =>
+      parseQueryResponse(
+        TreeSchema,
+        services.tree(authenticate(request), request.params.id),
+        { projectId: request.params.id },
+      ),
+  );
+  app.get<{
+    Params: ProjectParams;
+    Querystring: { limit?: string; cursor?: string };
+  }>(
+    QueryRoutes.files,
+    { schema: { querystring: FilePageQuerySchema } },
+    (request) => {
+      const files = services.tree(authenticate(request), request.params.id);
+      const input: FilePageInput = {
+        ...(request.query.limit ? { limit: Number(request.query.limit) } : {}),
+        ...(request.query.cursor ? { cursor: request.query.cursor } : {}),
+      };
+      return parseQueryResponse(
+        FilePageSchema,
+        pageFiles(
+          request.params.id,
+          catalog.head(request.params.id),
+          files,
+          input,
+        ),
+        { projectId: request.params.id, limit: input.limit ?? 100 },
+      );
+    },
   );
   app.post<{ Params: ProjectParams; Body: SearchInput }>(
     QueryRoutes.search,
     { schema: { body: SearchSchema } },
     (request) =>
-      services.search(authenticate(request), request.params.id, request.body),
+      parseQueryResponse(
+        SearchResultSchema,
+        services.search(authenticate(request), request.params.id, request.body),
+        { projectId: request.params.id, limit: request.body.limit ?? 10 },
+      ),
   );
-  app.get<{
-    Params: ProjectParams;
-    Querystring: { fileId: string; revisionId: string };
-  }>(QueryRoutes.read, { schema: { querystring: ReadSchema } }, (request) =>
-    services.read(
-      authenticate(request),
-      request.params.id,
-      request.query.fileId,
-      request.query.revisionId,
-    ),
+  app.get<{ Params: ProjectParams; Querystring: Record<string, unknown> }>(
+    QueryRoutes.read,
+    { schema: { querystring: ReadQuerySchema } },
+    (request) => {
+      const principal = authenticate(request);
+      const { fileId, revisionId, ...options } = parseReadQuery(request.query);
+      return parseQueryResponse(
+        ReadResultSchema,
+        services.read(
+          principal,
+          request.params.id,
+          fileId,
+          revisionId,
+          options,
+        ),
+        { projectId: request.params.id, fileId, revisionId },
+      );
+    },
   );
   app.post<{ Params: ProjectParams }>('/api/projects/:id/tokens', (request) => {
     authorize(authenticate(request), request.params.id, true);
@@ -914,7 +1055,13 @@ export function createApplication(options: ApplicationOptions) {
       return { audit: status, delivered, budget: 100 };
     },
   );
-  registerMcp(app, services);
+  registerMcp(app, {
+    ...services,
+    filesPage(principal, projectId, input) {
+      const files = services.tree(principal, projectId);
+      return pageFiles(projectId, catalog.head(projectId), files, input);
+    },
+  });
   const webRoot = resolve(options.webRoot ?? 'apps/web/dist');
   app.get('/*', (request, reply) => {
     if (request.url.startsWith('/api/') || request.url.startsWith('/mcp'))
@@ -949,6 +1096,11 @@ export function createApplication(options: ApplicationOptions) {
       .header('X-Content-Type-Options', 'nosniff')
       .send(readStaticAsset(webRoot, path));
   });
+  // Stop claiming/cancel native work before waiting for already accepted HTTP requests.
+  app.addHook('preClose', async () => {
+    readAdmission.close();
+    await coordinator.stop();
+  });
   app.addHook('onClose', async () => {
     await coordinator.stop();
     auditDispatcher.stop();
@@ -958,5 +1110,13 @@ export function createApplication(options: ApplicationOptions) {
     auditDispatcher.start();
     coordinator.start();
   }
-  return { app, catalog, store, coordinator, services, auditDispatcher };
+  return {
+    app,
+    catalog,
+    store,
+    coordinator,
+    services,
+    auditDispatcher,
+    readAdmission,
+  };
 }

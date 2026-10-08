@@ -1,12 +1,14 @@
 import { Type, type Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
+export const CURRENT_STORAGE_VERSION = 2;
+export const APPLICATION_COMPATIBILITY = 'single-writer-schema2-preview';
 export const BackupManifestSchema = Type.Object(
   {
     format: Type.Literal('opencontext-backup'),
     version: Type.Literal(1),
     complete: Type.Literal(true),
     id: Type.String({ pattern: '^[a-f0-9-]{36}$' }),
-    storageVersion: Type.Literal(1),
+    storageVersion: Type.Union([Type.Literal(1), Type.Literal(2)]),
     mode: Type.Union([Type.Literal('demo'), Type.Literal('private')]),
     createdAt: Type.String({ maxLength: 40 }),
     heads: Type.Array(

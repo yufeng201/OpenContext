@@ -11,10 +11,19 @@ import {
   randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  lstatSync,
+  readdirSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { assertCompleteRoot, noLinks } from './maintenance.ts';
+import { CATALOG_SCHEMA, validateCatalogSchema } from './schema.ts';
 import { validateAuditStorage } from './audit-storage.ts';
+import { CURRENT_STORAGE_VERSION } from '@opencontext/contracts/maintenance';
 import type {
   Binding,
   ExecutionLock,
@@ -71,6 +80,28 @@ function isBusy(error: unknown): boolean {
 
 function canonicalDatabasePath(dbPath: string): string {
   const absolute = resolve(dbPath);
+  assertCompleteRoot(dirname(absolute));
+  for (const candidate of [
+    absolute,
+    `${absolute}.authority.sqlite`,
+    `${absolute}-wal`,
+    `${absolute}-shm`,
+    `${absolute}.authority.sqlite-journal`,
+    `${absolute}.authority.sqlite-wal`,
+    `${absolute}.authority.sqlite-shm`,
+  ]) {
+    noLinks(candidate);
+    if (existsSync(candidate)) {
+      const stat = lstatSync(candidate);
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error('UNSAFE_FILE');
+    }
+  }
+  if (
+    !existsSync(absolute) &&
+    existsSync(dirname(absolute)) &&
+    readdirSync(dirname(absolute)).length > 0
+  )
+    throw new Error('DATA_ROOT_NOT_EMPTY');
   mkdirSync(dirname(absolute), { recursive: true });
   return existsSync(absolute)
     ? realpathSync(absolute)
@@ -152,9 +183,15 @@ export class Catalog {
   private databaseClosed = false;
 
   constructor(dbPath: string, options: CatalogOptions = { mode: 'private' }) {
+    if (
+      dbPath !== ':memory:' &&
+      existsSync(join(dirname(dbPath), '.restore-incomplete'))
+    )
+      throw new Error('RESTORE_INCOMPLETE');
     if (options.mode !== 'demo' && options.mode !== 'private')
       throw new Error('INVALID_DATA_MODE');
     const path = dbPath === ':memory:' ? dbPath : canonicalDatabasePath(dbPath);
+    const existingDatabase = path !== ':memory:' && existsSync(path);
     // This separate connection holds the SQLite OS lock for the entire Catalog
     // lifetime. Control-db transactions remain short and independent. Never
     // unlink this file to "recover" authority: process death releases its lock.
@@ -180,6 +217,8 @@ export class Catalog {
           "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
         )
         .all();
+      if (existingDatabase && tables.length === 0)
+        throw new Error('SCHEMA_INCOMPLETE');
       const savedVersion = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
             .prepare(
@@ -187,7 +226,15 @@ export class Catalog {
             )
             .get()?.value
         : undefined;
-      if (savedVersion !== undefined && savedVersion !== '1')
+      if (
+        savedVersion === '1' ||
+        (savedVersion === undefined && tables.length > 0)
+      )
+        throw new Error('UPGRADE_REQUIRED');
+      if (
+        savedVersion !== undefined &&
+        savedVersion !== String(CURRENT_STORAGE_VERSION)
+      )
         throw new Error('SCHEMA_UNSUPPORTED');
       const auditFormat = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
@@ -196,6 +243,8 @@ export class Catalog {
         : undefined;
       if (auditFormat !== undefined && auditFormat !== '2')
         throw new Error('SCHEMA_UNSUPPORTED');
+      if (savedVersion === String(CURRENT_STORAGE_VERSION))
+        validateCatalogSchema(this.db);
       if (auditFormat === '2') validateAuditStorage(this.db);
       const savedMode = tables.some((table) => table.name === 'catalog_meta')
         ? this.db
@@ -211,87 +260,7 @@ export class Catalog {
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = FULL;
-      CREATE TABLE IF NOT EXISTS catalog_meta (
-        key TEXT PRIMARY KEY, value TEXT NOT NULL
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS audit_events (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, delivered_at TEXT,
-        event_json TEXT NOT NULL CHECK(json_valid(event_json))
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS audit_time ON audit_events(time);
-      CREATE UNIQUE INDEX IF NOT EXISTS audit_event_id ON audit_events(json_extract(event_json,'$.id'));
-      CREATE TABLE IF NOT EXISTS audit_pending (
-        id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
-        event_json TEXT NOT NULL CHECK(json_valid(event_json) AND length(event_json)<=2048)
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS projects (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
-        head TEXT, created_at TEXT NOT NULL
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS bindings (
-        id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
-        name TEXT NOT NULL, instance_ref TEXT NOT NULL UNIQUE,
-        package_ref TEXT NOT NULL, config_json TEXT NOT NULL CHECK(json_valid(config_json)),
-        connector_json TEXT CHECK(connector_json IS NULL OR json_valid(connector_json)),
-        processor_json TEXT CHECK(processor_json IS NULL OR json_valid(processor_json)),
-        active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
-        source_version TEXT, last_error TEXT, UNIQUE(project_id,id)
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS runs (
-        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, binding_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('sync','process')),
-        state TEXT NOT NULL CHECK(state IN ('queued','running','published','failed','superseded')),
-        fence TEXT NOT NULL DEFAULT '0' CHECK(length(fence)>0 AND fence NOT GLOB '*[^0-9]*'),
-        incarnation TEXT NOT NULL, lease_until INTEGER,
-        input_commit TEXT, result_commit TEXT, error TEXT, created_at TEXT NOT NULL,
-        skipped_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(skipped_json)),
-        execution_json TEXT CHECK(execution_json IS NULL OR json_valid(execution_json)),
-        FOREIGN KEY(project_id,binding_id) REFERENCES bindings(project_id,id)
-      ) STRICT;
-      CREATE UNIQUE INDEX IF NOT EXISTS one_active_run
-        ON runs(binding_id,kind) WHERE state IN ('queued','running');
-      CREATE TABLE IF NOT EXISTS commits (
-        project_id TEXT NOT NULL REFERENCES projects(id), id TEXT NOT NULL,
-        parent_id TEXT, manifest_hash TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
-        created_at TEXT NOT NULL, PRIMARY KEY(project_id,id)
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS revisions (
-        project_id TEXT NOT NULL, file_id TEXT NOT NULL, revision_id TEXT NOT NULL,
-        content_hash TEXT NOT NULL, entry_json TEXT NOT NULL CHECK(json_valid(entry_json)),
-        first_commit TEXT NOT NULL, PRIMARY KEY(project_id,file_id,revision_id),
-        FOREIGN KEY(project_id,first_commit) REFERENCES commits(project_id,id)
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS current_files (
-        project_id TEXT NOT NULL, file_id TEXT NOT NULL, revision_id TEXT NOT NULL,
-        binding_id TEXT NOT NULL, logical_path TEXT NOT NULL,
-        tombstone INTEGER NOT NULL CHECK(tombstone IN (0,1)),
-        entry_json TEXT NOT NULL CHECK(json_valid(entry_json)),
-        PRIMARY KEY(project_id,file_id),
-        FOREIGN KEY(project_id,binding_id) REFERENCES bindings(project_id,id),
-        FOREIGN KEY(project_id,file_id,revision_id) REFERENCES revisions(project_id,file_id,revision_id)
-      ) STRICT;
-      CREATE UNIQUE INDEX IF NOT EXISTS one_live_path
-        ON current_files(project_id,logical_path) WHERE tombstone=0;
-      CREATE TABLE IF NOT EXISTS outbox (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL,
-        commit_id TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1)),
-        UNIQUE(project_id,commit_id),
-        FOREIGN KEY(project_id,commit_id) REFERENCES commits(project_id,id)
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS reader_tokens (
-        id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE,
-        project_id TEXT NOT NULL REFERENCES projects(id),
-        revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1))
-      ) STRICT;
-      CREATE TABLE IF NOT EXISTS binding_imports (
-        binding_id TEXT NOT NULL REFERENCES bindings(id), id TEXT NOT NULL,
-        filename TEXT NOT NULL, content_hash TEXT NOT NULL,
-        bytes INTEGER NOT NULL CHECK(bytes>=0),
-        active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
-        PRIMARY KEY(binding_id,id)
-      ) STRICT;
-      CREATE UNIQUE INDEX IF NOT EXISTS one_current_import_filename
-        ON binding_imports(binding_id,filename) WHERE active=1;
+      ${CATALOG_SCHEMA}
     `);
       if (
         !this.db
@@ -339,9 +308,9 @@ export class Catalog {
         }
         this.db
           .prepare(
-            "INSERT INTO catalog_meta(key,value) VALUES('storage_version','1') ON CONFLICT(key) DO NOTHING",
+            "INSERT INTO catalog_meta(key,value) VALUES('storage_version',?) ON CONFLICT(key) DO NOTHING",
           )
-          .run();
+          .run(String(CURRENT_STORAGE_VERSION));
         this.db
           .prepare(
             "INSERT INTO catalog_meta(key,value) VALUES('audit_format','2') ON CONFLICT(key) DO NOTHING",

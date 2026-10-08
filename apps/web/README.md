@@ -34,3 +34,5 @@ RHF 使用 contracts 的 TypeBox schema，通过 Ajv 校验；token 不进 URL/l
 协议/API 集成及磁盘耐久性测试由仓库业务测试负责；这条浏览器流程不能证明真实 Agent 模型调用或完整 P1 已完成。
 
 `tests/readiness.spec.ts`新增3项用户视角验收（全套17项）：目录/快速筛选/历史/跨空间/焦点/窄屏，失败任务恢复，以及真实HTTP MCP固定版本/权限/撤销。fixture还必须有`docs/guide.md`和`docs/architecture/decision.md`，后者含`reverify-multilevel-needle`。本地验收创建一次性合成仓库和Feishu fixture，不读取真实凭据或会话。仓库CI目前只运行pnpm check；浏览器CI提案因现有OAuth缺workflow权限而未提交。
+
+当前 Reader 默认返回8KiB，并提供确定性章节目录、按标题定位、续读及显式全文按钮；新浏览器用例还要求fixture的`docs/large.md`包含`# Large`、`## Start`、足够超过8KiB的合成正文及`## End`后`budget-tail-needle`。这是渐进式读取验证，不是模型摘要或真实Agent调用。

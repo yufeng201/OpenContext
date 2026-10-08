@@ -63,6 +63,8 @@ inProgress/pending、summary-only、未知item、缺必需字段、Claude子Agen
 
 API等价入口均要求owner：`GET/POST /api/projects/:id/bindings/:bindingId/imports`列举/上传对象；POST携 `filename`、UTF-8 JSON字符串 `content`及 `expectedObjectId`。新建用null；同名更新必须使用刚读取的当前object ID。文件名最长120字符，只用英数、点、下划线、连字符，以英数开头并以`.json`结束。不要把本地 `stagingPath`传给服务器让它读取。
 
+候选正文是 Markdown，当前包含 Status、Provenance、Content 章节，可按章节与字节预算逐层读取，见[渐进式披露](PROGRESSIVE_CONTEXT.md)。scope/类型/完整性错误会在页面提示具体恢复路径；重新选择正确文件后重试，不删除事件或篡改项目归属来绕过预检。
+
 ## 原文、归一化与候选
 
 | 层                | 用途                                                                                                   | 不能宣称                                                          |

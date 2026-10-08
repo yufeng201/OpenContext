@@ -17,7 +17,7 @@
 
 直接受信Catalog调用没有HTTP身份时记system；API携带服务器已认证主体，不接受客户端伪造request ID。来源重复撤销、同内容导入、已有queued/running入队和已完成相同commit按既有幂等/CAS规则不新增相同业务效果；若是新的请求尝试，可另有best effort请求事件。重复创建token不是幂等操作，响应丢失后不能恢复明文token；应以已提交token UUID审计并撤销未知结果，不能声称所有HTTP请求exactly-once。
 
-**未覆盖同事务保证**：固定读/搜索/拒绝、session登录退出、导出/retry的请求日志、worker claim/heartbeat/fail/noop结果、启动迁移和离线backup/restore/环境owner配置。它们不应被描述为已提交关键变更审计。事件`guarantee=committed`指与所列变更一起持久化的意图；`best_effort`指独立记录，崩溃窗口仍存在，旧记录缺字段默认best_effort。读取不会因日志失败变成假装未读；只读日志已丢失不能重造。
+**未覆盖同事务保证**：固定读/搜索/拒绝、session登录退出、导出/retry的请求日志、worker claim/heartbeat/fail/noop结果、既有启动初始化和离线backup/restore/环境owner配置。它们不应被描述为已提交关键变更审计。事件`guarantee=committed`指与所列变更一起持久化的意图；`best_effort`指独立记录，崩溃窗口仍存在，旧记录缺字段默认best_effort。读取不会因日志失败变成假装未读；只读日志已丢失不能重造。
 
 文件blob和可信插件checkpoint在SQLite外，失败可留未引用的私有对象；本批不删除这些对象或保证跨文件系统原子性。物理断电、损坏/丢盘、NFS/多节点、回滚数据库到旧快照、同OS/DB管理员篡改不在保证内；仍无外部不可篡改/合规保证。
 
@@ -50,8 +50,10 @@ pending导出和retry均owner-only，reader403/无认证401；不允许客户端
 
 ## 兼容、备份与验收
 
-兼容95546826旧表/记录，新增delivered_at和唯一事件索引、audit_pending、audit_format=2。未知audit_format在当前启动/停写预检中拒绝，启动不先写incarnation或迁移控制库。若旧表已有冲突事件ID会拒绝索引升级，须在备份后由受信操作员调查，不能自动删记录。**禁止降级到旧二进制写此库**：95546826没有检查新audit_format，不能宣称所有历史版本已强制防降级；完整迁移/回滚门禁仍是P0。
+离线校验支持95546826旧表/记录；当前schema2写者不直接启动schema1，须经受审ce2基线快照的新目录升级。审计层已新增delivered_at和唯一事件索引、audit_pending、audit_format=2。未知audit_format在当前启动/停写预检中拒绝，启动不先写incarnation或迁移控制库。若旧表已有冲突事件ID会拒绝索引升级，须在备份后由受信操作员调查，不能自动删记录。**禁止降级到旧二进制写此库**：95546826没有检查新audit_format，不能宣称所有历史版本已强制防降级；完整迁移/回滚门禁仍是P0。
 
 离线diagnose/preflight/backup verify和当前格式启动会校验审计表必要字段/主键/唯一索引、标记、事件schema/ID/时间对应、10000条上限以及pending的committed保证与已投递冲突。当前格式缺表、损坏payload或索引拒绝，不静默重建丢失记录。合法旧无审计库/955 ledger是已审阅迁移输入；无版本标记却有pending的混合状态拒绝。离线允许合法积压和已持久缺口，以便停写快照/恢复；因此离线ready仅证明快照可验证，不等于在线audit健康，启动后须检查owner readiness。联合SQLite备份包含未投递意图和缺口标记；恢复后当前软件有界重放并继续要求owner确认，原reader撤销/当前权限复核仍适用。审计不能知道快照之后的成员撤权、法规删除或OS操作，不替代原备份授权流程。
 
 本批实际故障测试覆盖：真实SIGKILL发生在意图已插入而COMMIT前、COMMIT后和sink事务中；重复/冲突投递；意图失败回滚来源/token/import/queue与发布head；SQLite页预算造成真实SQLITE_FULL回滚；10000队列上限与重启；sink错误/circuit/owner恢复/readiness；秘密/正文不进记录。SQLITE_FULL是受控页预算测试，不是物理磁盘拔出；进程SIGKILL不是物理断电。完整check、浏览器及部署/恢复演练以本轮执行记录为准。身份/RBAC继续暂停，外部sink/OS隔离另见[出站审计](EGRESS_AUDIT.md)和[产品门槛](PRODUCT_READINESS.md)。
+
+显式schema1→2新目录升级的storage.upgrade意图与版本标记同事务，目标完成前保持恢复隔离；备份/恢复本身仍不具有完整动作审计，见[升级回滚指南](PRODUCTION_RUNBOOK.md)。

@@ -8,12 +8,14 @@ const pages = [
   ['concepts', '核心概念', 'CORE_CONCEPTS.md'],
   ['query-access', 'REST / SDK / CLI / MCP', 'QUERY_ACCESS.md'],
   ['session', 'Session 接入', 'SESSION_IMPORT.md'],
+  ['progressive-context', 'Markdown 与渐进披露', 'PROGRESSIVE_CONTEXT.md'],
   ['feishu', '飞书支持等级', 'FEISHU_CHAT.md'],
   ['plugins', '插件开发', 'PLUGIN_DEVELOPMENT.md'],
   ['operations', '运维与安全', 'OPERATIONS.md'],
   ['backup-recovery', '备份恢复与诊断', 'BACKUP_RECOVERY.md'],
   ['deployment-security', '部署与安全门槛', 'DEPLOYMENT_SECURITY.md'],
   ['egress-audit', '出站与审计', 'EGRESS_AUDIT.md'],
+  ['production-runbook', '单机部署与回滚', 'PRODUCTION_RUNBOOK.md'],
   ['audit-durability', '事务审计与恢复', 'AUDIT_DURABILITY.md'],
   ['team-identity', '团队身份决策', 'TEAM_IDENTITY_DECISION.md'],
   ['readiness', '产品就绪矩阵', 'PRODUCT_READINESS.md'],
@@ -126,7 +128,7 @@ rmSync(output, { recursive: true, force: true });
 mkdirSync(output, { recursive: true });
 writeFileSync(
   resolve(output, 'style.css'),
-  `*{box-sizing:border-box}body{margin:0;color:#20232c;background:#fff;font:16px/1.7 system-ui,sans-serif}a{color:#7047eb}code,pre{font-family:ui-monospace,monospace}code{background:#f4f2fa;padding:2px 5px;border-radius:4px}pre{background:#f8f9fb;border:1px solid #e5e7ed;border-radius:8px;padding:18px;overflow:auto}pre code{padding:0;background:none}.layout{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:100vh}aside{background:#f9fafb;border-right:1px solid #e5e7ed;padding:28px 20px}nav{display:grid;gap:8px}nav a{text-decoration:none;padding:8px 12px;border-radius:6px;color:#555b66}nav a[aria-current=page]{background:#ece6ff;color:#6940ee}.brand{font-size:22px;font-weight:650;color:#20232c;margin-bottom:20px}main{max-width:1100px;padding:34px 48px;min-width:0}.status{background:#f5f1ff;border:1px solid #e5dcfc;padding:14px 18px;border-radius:8px;font-size:14px}.table{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}td,th{border:1px solid #e5e7ed;padding:12px;text-align:left;vertical-align:top}th{background:#f9fafb}h1{font-size:32px;line-height:1.3}h2{font-size:23px;margin-top:36px}footer{border-top:1px solid #e5e7ed;padding-top:16px;margin-top:36px;color:#626977;font-size:14px}@media(max-width:720px){.layout{display:block}aside{padding:18px;border-right:0;border-bottom:1px solid #e5e7ed}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:22px 18px}h1{font-size:28px}}`,
+  `*{box-sizing:border-box}body{margin:0;color:#20232c;background:#fff;font:16px/1.7 system-ui,sans-serif}a{color:#7047eb}code,pre{font-family:ui-monospace,monospace}code{overflow-wrap:anywhere;background:#f4f2fa;padding:2px 5px;border-radius:4px}pre{background:#f8f9fb;border:1px solid #e5e7ed;border-radius:8px;padding:18px;overflow:auto}pre code{padding:0;background:none;overflow-wrap:normal}.layout{display:grid;grid-template-columns:260px minmax(0,1fr);min-height:100vh}aside{background:#f9fafb;border-right:1px solid #e5e7ed;padding:28px 20px}nav{display:grid;gap:8px}nav a{text-decoration:none;padding:8px 12px;border-radius:6px;color:#555b66}nav a[aria-current=page]{background:#ece6ff;color:#6940ee}.brand{font-size:22px;font-weight:650;color:#20232c;margin-bottom:20px}main{max-width:1100px;padding:34px 48px;min-width:0}.status{background:#f5f1ff;border:1px solid #e5dcfc;padding:14px 18px;border-radius:8px;font-size:14px}.table{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}td,th{border:1px solid #e5e7ed;padding:12px;text-align:left;vertical-align:top}th{background:#f9fafb}h1{font-size:32px;line-height:1.3}h2{font-size:23px;margin-top:36px}footer{border-top:1px solid #e5e7ed;padding-top:16px;margin-top:36px;color:#626977;font-size:14px}@media(max-width:720px){.layout{display:block}aside{padding:18px;border-right:0;border-bottom:1px solid #e5e7ed}nav{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:22px 18px}h1{font-size:28px}}`,
 );
 for (const [slug, title, file] of pages) {
   const source = readFileSync(resolve('docs', file), 'utf8');

@@ -69,3 +69,18 @@ describe('Web request boundary', () => {
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
+
+it('Session import failures name the recovery without encouraging scope/completeness tampering', () => {
+  expect(errorText(new ApiError(400, 'PROJECT_SCOPE_MISMATCH'))).toContain(
+    '新建正确 scope',
+  );
+  expect(errorText(new ApiError(400, 'PROJECT_SCOPE_MISMATCH'))).toContain(
+    '不要修改正文',
+  );
+  expect(errorText(new ApiError(400, 'PARTIAL_SESSION'))).toContain(
+    '不要仅修改 complete',
+  );
+  expect(errorText(new ApiError(400, 'INVALID_SESSION'))).toContain(
+    'Codex/Claude',
+  );
+});

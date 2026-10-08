@@ -16,8 +16,18 @@ import {
   inspectStorage,
   noLinks,
 } from '../packages/state-sqlite/src/maintenance.ts';
+import {
+  CURRENT_STORAGE_VERSION,
+  APPLICATION_COMPATIBILITY,
+} from '../packages/contracts/src/maintenance.ts';
 import { safeErrorCode } from '../packages/contracts/src/errors.ts';
-import { parsePublicOrigin, parsePort } from '../apps/server/src/deployment.ts';
+import {
+  parsePublicOrigin,
+  parsePort,
+  ownerToken,
+  runtimeConfig,
+  resourceAdmission,
+} from '../apps/server/src/deployment.ts';
 import { readStaticAsset } from '../apps/server/src/static.ts';
 export function preflight(env: Record<string, string | undefined>): object {
   if (!/^v24\.(?:19|[2-9][0-9])\./.test(process.version))
@@ -43,12 +53,11 @@ export function preflight(env: Record<string, string | undefined>): object {
     env['OPENCONTEXT_TEST_REPO_ROOT'] !== undefined
   )
     throw new Error('TEST_CONFIGURATION_DENIED');
-  const token = env['OPENCONTEXT_OWNER_TOKEN'] ?? '';
-  if (token.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
-  if (token.length > 256) throw new Error('OWNER_TOKEN_TOO_LONG');
-  if (!/^[!-~]+$/.test(token)) throw new Error('INVALID_OWNER_TOKEN');
+  ownerToken(env);
+  const runtime = runtimeConfig(env);
   const dataRoot = env['OPENCONTEXT_DATA_ROOT'];
   if (!dataRoot || !isAbsolute(dataRoot)) throw new Error('INVALID_PATH');
+  resourceAdmission(dataRoot, env);
   const port = parsePort(env['PORT'] ?? '4310');
   const publicOrigin = env['OPENCONTEXT_PUBLIC_ORIGIN'];
   if (publicOrigin) parsePublicOrigin(publicOrigin);
@@ -68,9 +77,11 @@ export function preflight(env: Record<string, string | undefined>): object {
   }
   const base = {
     node: process.version,
+    applicationCompatibility: APPLICATION_COMPATIBILITY,
+    writeStorageVersion: CURRENT_STORAGE_VERSION,
     pnpm,
     privateMode: true,
-    loopbackOnly: true,
+    loopbackOnly: runtime.host === '127.0.0.1',
     port,
     configuredTlsOrigin: Boolean(publicOrigin),
     installationScriptsDisabled: true,
@@ -87,12 +98,16 @@ export function preflight(env: Record<string, string | undefined>): object {
   try {
     db = new DatabaseSync(join(dataRoot, 'control.sqlite'), { readOnly: true });
     const inspection = inspectStorage(dataRoot, db);
-    const ready = inspection.ready && inspection.mode === 'private';
+    const upgradeRequired =
+      inspection.checks.migration.code === 'LEGACY_COMPATIBLE';
+    const ready =
+      inspection.ready && inspection.mode === 'private' && !upgradeRequired;
     return {
       ...base,
       ready,
       data: 'existing',
       inspection,
+      upgradeRequired,
       authorizationReviewRequired: true,
     };
   } finally {

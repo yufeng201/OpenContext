@@ -20,19 +20,19 @@ Web 开发热更新为 `pnpm dev:web`（127.0.0.1:5173），API/MCP代理到4310
 
 ## 已实现边界
 
-| 模块        | 已有代码与行为                                                                                                                   |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| server/权限 | owner bearer或HttpOnly/SameSite cookie，项目只读token及撤销；API/MCP每次检查当前项目授权，source撤销传播衍生内容                 |
-| 文件        | SHA256 blob、不可变revision/commit清单；临时写→文件fsync→rename→父目录fsync后，SQLite短事务发布head、cursor、run与outbox         |
-| 调度        | SQLite持久队列、单worker轮询、租约/心跳、十进制fence、新server incarnation；重启恢复queued工作，旧attempt不得发布                |
-| 插件注册    | StaticRegistry统一发现、配置验证、package digest/config/instance锁；通用binding选择connector/processor，任务冻结锁与导入对象引用 |
-| Git插件     | 注册为ConnectorDefinition；固定SHA文本快照、重复幂等、rename稳定ID、增改删、强推/缺旧SHA对账、跳过报告                           |
-| Session插件 | Codex/Claude显式v1 envelope上传；预检后落盘，scope/ID/完整性校验；raw精确保留、文本归一化、已知工具项raw-only诊断                |
-| processor   | 注册为ProcessorDefinition；Markdown导航/摘录不调用模型；full集合提交、稳定slot、删除旧产物；不得覆盖human-owned                  |
-| Session候选 | 显式Memory/Rule/Experience及中文标记→确定性Markdown；message/raw双revision引用与依赖；不是语义总结或自动规则批准                 |
-| 检索        | SQLite FTS5 + 固定snapshot文本grep降级；原文/产物共同召回、freshness/current revision gate、固定引用；索引失败outbox保留重试     |
-| MCP         | 官方SDK stateless Streamable HTTP，/mcp提供context_search/context_read/context_tree；TypeBox参数校验，projectId必填              |
-| Web         | React/Vite/Tailwind/shadcn模式、Router/Query/RHF；登录/项目/来源/任务/搜索/固定引用；失权清缓存，无token本地持久化               |
+| 模块        | 已有代码与行为                                                                                                                                     |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| server/权限 | owner bearer或HttpOnly/SameSite cookie，项目只读token及撤销；API/MCP每次检查当前项目授权，source撤销传播衍生内容                                   |
+| 文件        | SHA256 blob、不可变revision/commit清单；临时写→文件fsync→rename→父目录fsync后，SQLite短事务发布head、cursor、run与outbox                           |
+| 调度        | SQLite持久队列、单worker轮询、租约/心跳、十进制fence、新server incarnation；重启恢复queued工作，旧attempt不得发布                                  |
+| 插件注册    | StaticRegistry统一发现、TypeBox manifest/配置验证、package digest/config/instance锁；有界生命周期与独立离线包conformance，任务冻结锁与导入对象引用 |
+| Git插件     | 注册为ConnectorDefinition；固定SHA文本快照、重复幂等、rename稳定ID、增改删、强推/缺旧SHA对账、跳过报告                                             |
+| Session插件 | Codex/Claude显式v1 envelope上传；预检后落盘，scope/ID/完整性校验；raw精确保留、文本归一化、已知工具项raw-only诊断                                  |
+| processor   | 注册为ProcessorDefinition；Markdown导航/摘录不调用模型；full集合提交、稳定slot、删除旧产物；不得覆盖human-owned                                    |
+| Session候选 | 显式Memory/Rule/Experience及中文标记→确定性Markdown；message/raw双revision引用与依赖；不是语义总结或自动规则批准                                   |
+| 检索        | SQLite FTS5 + 固定snapshot文本grep降级；原文/产物共同召回、freshness/current revision gate、固定引用；索引失败outbox保留重试                       |
+| MCP         | 官方SDK stateless Streamable HTTP，/mcp提供context_search/context_read/context_tree；TypeBox参数校验，projectId必填                                |
+| Web         | React/Vite/Tailwind/shadcn模式、Router/Query/RHF；登录/项目/来源/任务/搜索/固定引用；失权清缓存，无token本地持久化                                 |
 
 项目是本切片的权限和文件边界，Web 暂用“上下文空间”称呼；完整 Space 下多 project 层级还未实现。插件为静态注册的可信 native 代码；不支持安装任意第三方插件、隔离进程或动态更新。八类功能能力仍为平台目标，当前只有connector/processor可执行注册；其余内建能力和未实现能力见[插件开发](PLUGIN_DEVELOPMENT.md)。绑定配置只创建一次，没有在线编辑、配置迁移或热升级接口。
 
@@ -68,7 +68,7 @@ codex mcp add opencontext --url http://127.0.0.1:4310/mcp --bearer-token-env-var
 
 真实Chromium流程见 apps/web/README.md（仓库路径）：登录→建空间→Git同步→搜索/固定原文重载→Markdown产物共同召回→390px窄屏→退出；包含跳过提示，无本地storage token。环境没有Browser插件，使用系统Chromium与Playwright，实际查看桌面和窄屏截图。独立浏览器还验证项目切换、重复提交、错误恢复、来源与token撤权、320px视口及真实服务停机重启。在线阅读器每3秒重验授权，收到404清空缓存正文和路径；这是有检测窗口的轮询，不能即时收回已复制字节。Firefox/WebKit、真实模型工具采用率未验证。
 
-当前MCP没有分页/截断提示、read分块、精确token或完整响应预算、历史snapshot search；只有1–50的search命中上限、512码元单摘录及4096码元摘录总上限，元数据和正文read不计入该预算。domain拒绝目前由SDK表达为协议错误，未完成细化的工具错误契约。管理后台没有任务取消、来源配置在线修改（错误分支需重新添加）；health只证明进程存活，未检查所有已发布对象完整性。
+当前MCP/REST/Node源码SDK已有共享TypeBox查询响应校验、固定revision一致性与文件集合游标分页；读取正文验证UTF-8长度/hash，成功payload/工具包装另受16MiB上限。没有read分块、精确token预算、projects/search分页或历史snapshot search；1–50的search命中上限、512码元单摘录及4096码元摘录总上限保持，不能称总数。domain拒绝目前由SDK表达为协议错误，未完成细化的工具错误契约。管理后台没有任务取消、来源配置在线修改（错误分支需重新添加）；health只证明进程存活，未检查所有已发布对象完整性。
 
 当前未做：物理断电测试、生产备份/恢复工具、正式TLS部署包、私有Git凭据、远程Companion、人工编辑/提升界面、纠正关系API、完整OutputSet delta/第三方publisher、真实飞书授权验收、向量、完整配置DAG或插件市场。核心保护的纯规则/单元测试不替代这些端到端功能。首次用户可用成功已验证，不以此勾选整个PRD/P1。
 
@@ -101,3 +101,9 @@ harness-only ZIP 是开始业务开发前的独立检查点，包含当时39个�
 只对上游明确deleted形成当前文件删除并使依赖候选invalid；列表缺失不删除。HTTP拒绝/凭据失效仅阻止新同步，已发布档案仍按本地owner授权保留；owner撤销来源才阻断本地召回。没有远端ACL自动镜像、事件实时同步、附件下载或完整历史回复保证。当前500留存消息/100扫描页/10MiB容量超限即失败，不截断后宣称完整。完整操作、权限差别与必须备份plugin-state的理由见[飞书群指南](FEISHU_CHAT.md)。
 
 飞书检查点实测：完整`pnpm check`含195项业务单元/集成、7组harness及Web构建；新connector17合同、analysis10合同，均含在业务计数中。浏览器原10回归与新3项均覆盖；断网诊断自动排队问题修复后，新3项再次通过。官方MCP SDK实际initialize/list/search/read验证合成群来源和候选共同命中、固定引用/hash、跨项目及撤权拒绝。独立审查复验未确认snapshot重放重新验凭据/群权限，以及两层JSON转义的已知token在写盘前被拒绝。没有真实飞书或模型调用。
+
+## 2026-10-08 Markdown与真实用户操作补齐
+
+官方Session候选仍为Markdown，新增Status/Provenance/Content章节；原始JSON及固定lineage保持。REST/SDK/CLI/MCP支持可选确定性标题目录、行/章节、UTF-8字节预算与offset续读；旧客户端无新参数时保留全文形状。Reader默认8KiB并提供目录、展开、续读和显式全文；空空间新增来源入口及导入错误恢复已补齐，预览支持两种安全代码围栏。存储在分配正文缓冲前对元数据和实际fd大小执行16MiB门禁，正文仍需上限内全文校验和扫描。
+
+参数及准确未实现项见[渐进披露](PROGRESSIVE_CONTEXT.md)。这轮只使用隔离合成Git/Session，未运行真实客户端登录、模型调用或飞书采集，不创建真实访问凭据，不改现有演示服务。验收材料以固定本地提交和独立交接为准；历史测试结果不冒称本轮执行。

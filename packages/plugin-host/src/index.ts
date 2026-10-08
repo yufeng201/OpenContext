@@ -1,10 +1,13 @@
-import { isErrorCode } from '@opencontext/contracts/errors';
+import { isErrorCode, safeErrorCode } from '@opencontext/contracts/errors';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { Type } from '@sinclair/typebox';
+import { Type, TypeGuard } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import {
   ConnectionTestResultSchema,
+  PluginManifestSchema,
+  PluginProbeSchema,
+  type PluginProbeResult,
   type ConnectionTestResult,
 } from '@opencontext/contracts';
 import type {
@@ -28,9 +31,10 @@ import type {
 export class PluginHostError extends Error {
   readonly code: string;
   constructor(code: string) {
-    super(code);
+    const stableCode = isErrorCode(code) ? code : 'PROCESSING_FAILED';
+    super(stableCode);
     this.name = 'PluginHostError';
-    this.code = code;
+    this.code = stableCode;
   }
 }
 function fail(code: string): never {
@@ -215,109 +219,188 @@ export class StaticRegistry {
     string,
     { definition: PluginDefinition; digest: string }
   >();
-  constructor(definitions: readonly PluginDefinition[]) {
-    for (const definition of definitions) {
-      const { manifest } = definition;
+  private readonly timeoutMs: number;
+  private readonly maxConcurrent: number;
+  private active = 0;
+  constructor(
+    definitions: readonly PluginDefinition[],
+    options: { timeoutMs?: number; maxConcurrent?: number } = {},
+  ) {
+    try {
+      this.timeoutMs = options.timeoutMs ?? 30000;
+      this.maxConcurrent = options.maxConcurrent ?? 4;
       if (
-        manifest.protocolVersion !== '1' ||
-        manifest.location !== 'server' ||
-        manifest.trust !== 'official-trusted-native' ||
-        !manifest.capabilities.includes(definition.capability) ||
-        !['connector', 'processor'].includes(definition.capability)
+        !Number.isInteger(this.timeoutMs) ||
+        this.timeoutMs < 10 ||
+        this.timeoutMs > 30000 ||
+        !Number.isInteger(this.maxConcurrent) ||
+        this.maxConcurrent < 1 ||
+        this.maxConcurrent > 16
       )
-        fail('INCOMPATIBLE_PLUGIN');
-      const packageRef = `${manifest.id}@${manifest.version}`;
-      if (this.entries.has(packageRef)) fail('DUPLICATE_PLUGIN');
-      this.entries.set(packageRef, { definition, digest: digest(definition) });
+        fail('INVALID_PLUGIN_LIMIT');
+      for (const definition of definitions) {
+        const { manifest } = definition;
+        if (
+          !Value.Check(PluginManifestSchema, manifest) ||
+          !TypeGuard.IsSchema(definition.configSchema) ||
+          definition.configSchema.type !== 'object' ||
+          manifest.protocolVersion !== '1' ||
+          manifest.location !== 'server' ||
+          manifest.trust !== 'official-trusted-native' ||
+          !manifest.capabilities.includes(definition.capability) ||
+          !['connector', 'processor'].includes(definition.capability)
+        )
+          fail('INCOMPATIBLE_PLUGIN');
+        const packageRef = `${manifest.id}@${manifest.version}`;
+        if (this.entries.has(packageRef)) fail('DUPLICATE_PLUGIN');
+        this.entries.set(packageRef, {
+          definition,
+          digest: digest(definition),
+        });
+      }
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
     }
   }
   list(): PluginDescriptor[] {
-    return [...this.entries.entries()].map(([packageRef, entry]) => {
-      const { definition } = entry;
-      const status = definition.probe();
-      return {
-        packageRef,
-        packageDigest: entry.digest,
-        capability: definition.capability,
-        title: definition.title,
-        description: definition.description,
-        configSchema: JSON.parse(
-          JSON.stringify(definition.configSchema),
-        ) as Record<string, unknown>,
-        fields: structuredClone(definition.fields),
-        acceptsImports: definition.acceptsImports,
-        available:
-          status.available &&
-          status.capabilities.includes(definition.capability) &&
-          digest(definition) === entry.digest,
-        limitations: [...status.limitations],
-        ...(definition.capability === 'connector' && definition.testConnection
-          ? { supportsConnectionTest: true }
-          : {}),
-        ...(definition.recommendedProcessorRef
-          ? { recommendedProcessorRef: definition.recommendedProcessorRef }
-          : {}),
-      };
-    });
+    try {
+      return [...this.entries.entries()].map(([packageRef, entry]) => {
+        const { definition } = entry;
+        const status = this.probe(definition);
+        return {
+          packageRef,
+          packageDigest: entry.digest,
+          capability: definition.capability,
+          title: definition.title,
+          description: definition.description,
+          configSchema: JSON.parse(
+            JSON.stringify(definition.configSchema),
+          ) as Record<string, unknown>,
+          fields: structuredClone(definition.fields),
+          acceptsImports: definition.acceptsImports,
+          available:
+            status.available &&
+            status.capabilities.includes(definition.capability) &&
+            digest(definition) === entry.digest,
+          limitations: [...status.limitations],
+          ...(definition.capability === 'connector' && definition.testConnection
+            ? { supportsConnectionTest: true }
+            : {}),
+          ...(definition.recommendedProcessorRef
+            ? { recommendedProcessorRef: definition.recommendedProcessorRef }
+            : {}),
+        };
+      });
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   /** Startup migration of existing trusted local bindings only; new APIs must await prepare. */
   prepareSync(
     selection: { packageRef: string; config: Record<string, unknown> },
     capability: ExecutableCapability,
   ): PluginInstanceLock {
-    const entry = this.entry(selection.packageRef, capability);
-    const configurationHash = this.validate(entry.definition, selection.config);
-    return {
-      ref: `instance:${randomUUID()}@1`,
-      packageRef: selection.packageRef,
-      packageDigest: entry.digest,
-      configHash: configurationHash,
-      capability,
-      config: structuredClone(selection.config),
-    };
+    try {
+      const entry = this.entry(selection.packageRef, capability);
+      const configurationHash = this.validate(
+        entry.definition,
+        selection.config,
+      );
+      return {
+        ref: `instance:${randomUUID()}@1`,
+        packageRef: selection.packageRef,
+        packageDigest: entry.digest,
+        configHash: configurationHash,
+        capability,
+        config: structuredClone(selection.config),
+      };
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   async prepare(
     selection: { packageRef: string; config: Record<string, unknown> },
     capability: ExecutableCapability,
     context: ConfigurationContext = {},
   ): Promise<PluginInstanceLock> {
-    const lock = this.prepareSync(selection, capability);
-    await this.resolve(lock, capability).validateConfig?.(lock.config, context);
-    // Recheck after asynchronous validation; no mutations may drift the prepared lock.
-    this.resolve(lock, capability);
-    return lock;
+    try {
+      const lock = this.prepareSync(selection, capability);
+      if (context.signal?.aborted) fail('CANCELLED');
+      const definition = this.resolve(lock, capability);
+      if (definition.validateConfig)
+        await this.withDeadline(
+          (signal) =>
+            Promise.resolve(
+              definition.validateConfig!(lock.config, { ...context, signal }),
+            ),
+          context.signal,
+        );
+      // Recheck after asynchronous validation; no mutations may drift the prepared lock.
+      this.resolve(lock, capability);
+      return lock;
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   async validateImport(
     lock: PluginInstanceLock,
     content: string,
+    context: { signal?: AbortSignal } = {},
   ): Promise<void> {
-    const definition = this.resolve(lock, 'connector');
-    if (!definition.acceptsImports) fail('PLUGIN_IMPORTS_UNSUPPORTED');
-    const frozenConfig = freezeConfiguration(lock.config);
-    // Plugin errors stay intact (e.g. SECRET_DETECTED). The caller must not persist
-    // the bytes until this preflight succeeds; absent hooks are not secret scans.
-    await definition.validateImport?.(content, frozenConfig);
-    this.resolve(lock, 'connector');
+    try {
+      const definition = this.resolve(lock, 'connector');
+      if (!definition.acceptsImports) fail('PLUGIN_IMPORTS_UNSUPPORTED');
+      const frozenConfig = freezeConfiguration(lock.config);
+      // Plugin errors stay intact (e.g. SECRET_DETECTED). The caller must not persist
+      // the bytes until this preflight succeeds; absent hooks are not secret scans.
+      if (context.signal?.aborted) fail('CANCELLED');
+      if (definition.validateImport)
+        await this.withDeadline(
+          (signal) =>
+            Promise.resolve(
+              definition.validateImport!(content, frozenConfig, { signal }),
+            ),
+          context.signal,
+        );
+      this.resolve(lock, 'connector');
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   async testConnection(
     lock: PluginInstanceLock,
     signal: AbortSignal,
   ): Promise<ConnectionTestResult> {
-    if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
-    const definition = this.resolve(lock, 'connector');
-    if (!definition.testConnection) fail('CONNECTION_TEST_UNSUPPORTED');
-    const result: unknown = await definition.testConnection(
-      freezeConfiguration(lock.config),
-      { signal },
-    );
-    if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
-    this.resolve(lock, 'connector');
-    if (
-      !Value.Check(ConnectionTestResultSchema, result) ||
-      !isErrorCode(result.code)
-    )
-      fail('INVALID_PLUGIN_OUTPUT');
-    return result;
+    try {
+      if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
+      const definition = this.resolve(lock, 'connector');
+      if (!definition.testConnection) fail('CONNECTION_TEST_UNSUPPORTED');
+      let result: unknown;
+      try {
+        result = await this.withDeadline(
+          (bound) =>
+            definition.testConnection!(freezeConfiguration(lock.config), {
+              signal: bound,
+            }),
+          signal,
+        );
+      } catch (error) {
+        const code = safeErrorCode(error);
+        if (code === 'CANCELLED') fail('CONNECTION_TEST_CANCELLED');
+        if (code === 'PLUGIN_TIMEOUT') fail('CONNECTION_TEST_TIMEOUT');
+        throw error;
+      }
+      if (signal.aborted) fail('CONNECTION_TEST_CANCELLED');
+      this.resolve(lock, 'connector');
+      if (
+        !Value.Check(ConnectionTestResultSchema, result) ||
+        !isErrorCode(result.code)
+      )
+        fail('INVALID_PLUGIN_OUTPUT');
+      return result;
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   resolve(
     lock: PluginInstanceLock,
@@ -335,104 +418,196 @@ export class StaticRegistry {
     lock: PluginInstanceLock,
     capability: ExecutableCapability,
   ): PluginDefinition {
-    const entry = this.entry(lock.packageRef, capability);
-    const configurationHash = this.validate(entry.definition, lock.config);
-    if (
-      lock.capability !== capability ||
-      lock.packageDigest !== entry.digest ||
-      lock.configHash !== configurationHash ||
-      !INSTANCE_REF.test(lock.ref)
-    )
-      fail('PLUGIN_LOCK_MISMATCH');
-    return entry.definition;
+    try {
+      const entry = this.entry(lock.packageRef, capability);
+      const configurationHash = this.validate(entry.definition, lock.config);
+      if (
+        lock.capability !== capability ||
+        lock.packageDigest !== entry.digest ||
+        lock.configHash !== configurationHash ||
+        !INSTANCE_REF.test(lock.ref)
+      )
+        fail('PLUGIN_LOCK_MISMATCH');
+      return entry.definition;
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   async invokeConnector(
     lock: PluginInstanceLock,
     input: ConnectorInvocation,
     context: ExecutionContext,
   ): Promise<ConnectorOutput> {
-    const definition = this.resolve(lock, 'connector');
-    if (configHash(input.config) !== lock.configHash)
-      fail('PLUGIN_LOCK_MISMATCH');
-    if (
-      !Number.isSafeInteger(input.maxFiles) ||
-      input.maxFiles < 1 ||
-      input.maxFiles > 10000 ||
-      !Number.isSafeInteger(input.maxBytes) ||
-      input.maxBytes < 1 ||
-      input.maxBytes > 104857600
-    )
-      fail('INVALID_PLUGIN_INPUT');
-    if (input.imports.length && !definition.acceptsImports)
-      fail('PLUGIN_IMPORTS_UNSUPPORTED');
-    const refs = new Map(input.imports.map((ref) => [ref.id, ref]));
-    if (refs.size !== input.imports.length) fail('INVALID_PLUGIN_INPUT');
-    const guardedContext: ExecutionContext = {
-      ...context,
-      instanceRef: lock.ref,
-    };
-    if (context.readImport)
-      guardedContext.readImport = async (ref: ImportedObjectRef) => {
-        assertNotCancelled(context);
-        const locked = refs.get(ref.id);
-        if (!locked || canonical(locked) !== canonical(ref))
-          fail('IMPORT_ACCESS_DENIED');
-        const text = await context.readImport!(structuredClone(locked));
-        if (
-          Buffer.byteLength(text) !== locked.bytes ||
-          hash(text) !== locked.contentHash
-        )
-          fail('IMPORT_HASH_MISMATCH');
-        return text;
-      };
-    assertNotCancelled(context);
-    const output: unknown = await definition.invoke(
-      structuredClone({ ...input, config: lock.config }),
-      guardedContext,
-    );
-    assertNotCancelled(context);
-    if (!Value.Check(connectorOutput, output)) fail('INVALID_PLUGIN_OUTPUT');
-    checkFiles(output.files, input.maxFiles, input.maxBytes);
-    if (
-      output.renames.some(
-        (rename) => !safePath(rename.from) || !safePath(rename.to),
+    try {
+      const definition = this.resolve(lock, 'connector');
+      if (configHash(input.config) !== lock.configHash)
+        fail('PLUGIN_LOCK_MISMATCH');
+      if (
+        !Number.isSafeInteger(input.maxFiles) ||
+        input.maxFiles < 1 ||
+        input.maxFiles > 10000 ||
+        !Number.isSafeInteger(input.maxBytes) ||
+        input.maxBytes < 1 ||
+        input.maxBytes > 104857600
       )
-    )
-      fail('INVALID_PLUGIN_OUTPUT');
-    return output;
+        fail('INVALID_PLUGIN_INPUT');
+      if (input.imports.length && !definition.acceptsImports)
+        fail('PLUGIN_IMPORTS_UNSUPPORTED');
+      const refs = new Map(input.imports.map((ref) => [ref.id, ref]));
+      if (refs.size !== input.imports.length) fail('INVALID_PLUGIN_INPUT');
+      const output: unknown = await this.withDeadline((signal) => {
+        const guardedContext: ExecutionContext = {
+          ...context,
+          instanceRef: lock.ref,
+          signal,
+        };
+        if (context.readImport)
+          guardedContext.readImport = async (ref: ImportedObjectRef) => {
+            assertNotCancelled(guardedContext);
+            const locked = refs.get(ref.id);
+            if (!locked || canonical(locked) !== canonical(ref))
+              fail('IMPORT_ACCESS_DENIED');
+            const text = await context.readImport!(structuredClone(locked));
+            assertNotCancelled(guardedContext);
+            if (
+              Buffer.byteLength(text) !== locked.bytes ||
+              hash(text) !== locked.contentHash
+            )
+              fail('IMPORT_HASH_MISMATCH');
+            return text;
+          };
+        assertNotCancelled(guardedContext);
+        return definition.invoke(
+          structuredClone({ ...input, config: lock.config }),
+          guardedContext,
+        );
+      }, context.signal);
+      assertNotCancelled(context);
+      if (!Value.Check(connectorOutput, output)) fail('INVALID_PLUGIN_OUTPUT');
+      checkFiles(output.files, input.maxFiles, input.maxBytes);
+      if (
+        output.renames.some(
+          (rename) => !safePath(rename.from) || !safePath(rename.to),
+        )
+      )
+        fail('INVALID_PLUGIN_OUTPUT');
+      return output;
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   async invokeProcessor(
     lock: PluginInstanceLock,
     input: ProcessorInput & { config: Record<string, unknown> },
     context: ExecutionContext,
   ): Promise<ProcessorOutput> {
-    const definition = this.resolve(lock, 'processor');
-    if (configHash(input.config) !== lock.configHash)
-      fail('PLUGIN_LOCK_MISMATCH');
-    const references = new Set(
-      input.files.map(({ file }) => `${file.fileId}\n${file.revisionId}`),
-    );
-    assertNotCancelled(context);
-    const output: unknown = await definition.invoke(
-      structuredClone({ ...input, config: lock.config }),
-      context,
-    );
-    assertNotCancelled(context);
-    if (!Value.Check(processorOutput, output)) fail('INVALID_PLUGIN_OUTPUT');
-    checkFiles(output.outputs, 10001, 104857600);
-    const slots = new Set<string>();
-    for (const file of output.outputs) {
-      if (
-        slots.has(file.slotKey) ||
-        !file.derivedFrom.length ||
-        file.derivedFrom.some(
-          (ref) => !references.has(`${ref.fileId}\n${ref.revisionId}`),
+    try {
+      const definition = this.resolve(lock, 'processor');
+      if (configHash(input.config) !== lock.configHash)
+        fail('PLUGIN_LOCK_MISMATCH');
+      const references = new Set(
+        input.files.map(({ file }) => `${file.fileId}\n${file.revisionId}`),
+      );
+      assertNotCancelled(context);
+      const output: unknown = await this.withDeadline(
+        (signal) =>
+          definition.invoke(
+            structuredClone({ ...input, config: lock.config }),
+            {
+              ...context,
+              signal,
+              instanceRef: lock.ref,
+            },
+          ),
+        context.signal,
+      );
+      assertNotCancelled(context);
+      if (!Value.Check(processorOutput, output)) fail('INVALID_PLUGIN_OUTPUT');
+      checkFiles(output.outputs, 10001, 104857600);
+      const slots = new Set<string>();
+      for (const file of output.outputs) {
+        if (
+          slots.has(file.slotKey) ||
+          !file.derivedFrom.length ||
+          file.derivedFrom.some(
+            (ref) => !references.has(`${ref.fileId}\n${ref.revisionId}`),
+          )
         )
-      )
-        fail('INVALID_PLUGIN_OUTPUT');
-      slots.add(file.slotKey);
+          fail('INVALID_PLUGIN_OUTPUT');
+        slots.add(file.slotKey);
+      }
+      return output;
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
     }
-    return output;
+  }
+  operationCounts() {
+    return { active: this.active, maxConcurrent: this.maxConcurrent };
+  }
+  /** Deadline bounds waiting; continuing trusted-native work retains its quota. */
+  private async withDeadline<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    external?: AbortSignal,
+  ): Promise<T> {
+    if (external?.aborted) fail('CANCELLED');
+    if (this.active >= this.maxConcurrent) fail('RESOURCE_BUSY');
+    const controller = new AbortController(),
+      forward = () => controller.abort('CANCELLED');
+    external?.addEventListener('abort', forward, { once: true });
+    const timer = setTimeout(
+      () => controller.abort('PLUGIN_TIMEOUT'),
+      this.timeoutMs,
+    );
+    this.active++;
+    const running = Promise.resolve().then(() => {
+      if (controller.signal.aborted) fail('CANCELLED');
+      return operation(controller.signal);
+    });
+    void running.then(
+      () => this.active--,
+      () => this.active--,
+    );
+    let stop: () => void = () => {};
+    try {
+      return await new Promise<T>((resolve, reject) => {
+        stop = () =>
+          reject(new PluginHostError(String(controller.signal.reason)));
+        controller.signal.addEventListener('abort', stop, { once: true });
+        running.then(resolve, (error) =>
+          reject(
+            new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED')),
+          ),
+        );
+      });
+    } finally {
+      clearTimeout(timer);
+      external?.removeEventListener('abort', forward);
+      controller.signal.removeEventListener('abort', stop);
+    }
+  }
+  private probe(definition: PluginDefinition) {
+    try {
+      const native = definition.probe();
+      const copy = (value: unknown, maximum: number): unknown[] => {
+        if (!Array.isArray(value)) fail('INVALID_PLUGIN_OUTPUT');
+        const length = value.length;
+        if (!Number.isSafeInteger(length) || length < 0 || length > maximum)
+          fail('INVALID_PLUGIN_OUTPUT');
+        const items: unknown[] = [];
+        for (let index = 0; index < length; index++) items.push(value[index]);
+        return items;
+      };
+      const projected = {
+        available: native.available,
+        capabilities: copy(native.capabilities, 8),
+        limitations: copy(native.limitations, 20),
+      };
+      if (!Value.Check(PluginProbeSchema, projected))
+        fail('INVALID_PLUGIN_OUTPUT');
+      return JSON.parse(JSON.stringify(projected)) as PluginProbeResult;
+    } catch (error) {
+      throw new PluginHostError(safeErrorCode(error, 'PROCESSING_FAILED'));
+    }
   }
   private entry(
     packageRef: string,
@@ -444,7 +619,7 @@ export class StaticRegistry {
       fail('PLUGIN_CAPABILITY_MISMATCH');
     if (digest(entry.definition) !== entry.digest)
       fail('PLUGIN_ARTIFACT_CHANGED');
-    const status = entry.definition.probe();
+    const status = this.probe(entry.definition);
     if (!status.available || !status.capabilities.includes(capability))
       fail('PLUGIN_UNAVAILABLE');
     return entry;
@@ -454,8 +629,12 @@ export class StaticRegistry {
     config: Record<string, unknown>,
   ): string {
     const configurationHash = configHash(config);
-    if (!Value.Check(definition.configSchema, config))
+    try {
+      if (!Value.Check(definition.configSchema, config))
+        fail('INVALID_PLUGIN_CONFIG');
+    } catch {
       fail('INVALID_PLUGIN_CONFIG');
+    }
     return configurationHash;
   }
 }

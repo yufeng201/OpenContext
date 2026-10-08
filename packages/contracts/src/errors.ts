@@ -1,6 +1,9 @@
 /** Only reviewed machine codes may cross an API or persistent diagnostic boundary. */
 const codes = new Set([
   'ACCESS_DENIED',
+  'UPGRADE_REQUIRED',
+  'UPGRADE_BASELINE_REQUIRED',
+  'NO_UPGRADE_REQUIRED',
   'EGRESS_DENIED',
   'TEST_CONFIGURATION_DENIED',
   'EGRESS_TIMEOUT',
@@ -71,6 +74,14 @@ const codes = new Set([
   'INPUT_INVALID',
   'INSTANCE_BUSY',
   'INTERNAL_ERROR',
+  'PLUGIN_TIMEOUT',
+  'POLICY_DENIED',
+  'INVALID_PLUGIN_LIMIT',
+  'INVALID_RESPONSE',
+  'INVALID_RESPONSE_CONTENT_TYPE',
+  'INVALID_RESPONSE_LIMIT',
+  'INVALID_CURSOR',
+  'CURSOR_STALE',
   'INVALID_OWNER_TOKEN',
   'INVALID_PUBLIC_ORIGIN',
   'INVALID_PORT',
@@ -79,6 +90,25 @@ const codes = new Set([
   'INSTALL_POLICY_UNSAFE',
   'RUNTIME_UNSUPPORTED',
   'STARTUP_FAILED',
+  'INVALID_SECRET_FILE',
+  'OWNER_TOKEN_CONFIGURATION_CONFLICT',
+  'INVALID_BIND_HOST',
+  'PUBLIC_ORIGIN_REQUIRED',
+  'INVALID_SHUTDOWN_TIMEOUT',
+  'RESOURCE_BUDGET_TOO_LOW',
+  'INVALID_RESOURCE_BUDGET',
+  'DISK_BUDGET_TOO_LOW',
+  'SHUTDOWN_TIMEOUT',
+  'SHUTDOWN_FAILED',
+  'INVALID_RELEASE_TARGET',
+  'RELEASE_SYMLINK_DENIED',
+  'RELEASE_FILE_DENIED',
+  'RELEASE_TARGET_REQUIRED',
+  'RELEASE_BUILD_FAILED',
+  'INVALID_RELEASE_ARCHIVE',
+  'RELEASE_ARCHIVE_LIMIT',
+  'RELEASE_FILE_SET_MISMATCH',
+  'RELEASE_HASH_MISMATCH',
   'DEMO_OWNER_TOKEN_CONFLICT',
   'DEMO_FEISHU_CREDENTIAL_CONFLICT',
   'UNSUPPORTED_MEDIA_TYPE',
@@ -103,7 +133,6 @@ const codes = new Set([
   'INVALID_PLUGIN_OUTPUT',
   'INVALID_PROJECT_ID',
   'INVALID_READINESS_RESPONSE',
-  'INVALID_RESPONSE',
   'INVALID_SCHEMA',
   'INVALID_SEARCH',
   'INVALID_SERVER_CREDENTIAL',
@@ -152,6 +181,7 @@ const codes = new Set([
   'REQUEST_FAILED',
   'RESOURCE_BUSY',
   'RESPONSE_TOO_LARGE',
+  'RESPONSE_WORK_LIMIT',
   'RESTORE_INCOMPLETE',
   'RESTORE_INSIDE_BACKUP',
   'RESTORE_NOT_READY',
@@ -159,6 +189,7 @@ const codes = new Set([
   'REVISION_COLLISION',
   'SCAN_LIMIT',
   'SCHEMA_UNSUPPORTED',
+  'SCHEMA_INCOMPLETE',
   'SECRET_DETECTED',
   'SECRET_INVALID',
   'SECRET_IN_RESPONSE',
@@ -188,14 +219,55 @@ const codes = new Set([
   'UPSTREAM_REJECTED',
   'UPSTREAM_UNAVAILABLE',
 ]);
+/** Never invoke native getters, inspect prototypes, coerce values or serialize an external error. */
+function ownErrorValue(error: unknown, field: string): unknown {
+  if (typeof error !== 'object' || error === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, field);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+export function isErrorCode(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 80 && codes.has(value);
+}
 export function safeErrorCode(
   error: unknown,
   fallback = 'INTERNAL_ERROR',
 ): string {
-  const message = error instanceof Error ? error.message : '';
-  const candidate = /^([A-Z][A-Z0-9_]+)(?::|$)/.exec(message)?.[1];
-  return candidate && codes.has(candidate) ? candidate : fallback;
+  const code = ownErrorValue(error, 'code');
+  if (isErrorCode(code)) return code;
+  const message = ownErrorValue(error, 'message');
+  const candidate =
+    typeof message === 'string'
+      ? /^([A-Z][A-Z0-9_]{0,79})(?::|$)/.exec(message.slice(0, 81))?.[1]
+      : undefined;
+  return isErrorCode(candidate)
+    ? candidate
+    : isErrorCode(fallback)
+      ? fallback
+      : 'INTERNAL_ERROR';
 }
-export function isErrorCode(value: unknown): value is string {
-  return typeof value === 'string' && codes.has(value);
+/** Only bounded, own data fields may accompany a stable code across an error boundary. */
+export function safeErrorMetadata(error: unknown): {
+  status?: number;
+  correlationId?: string;
+} {
+  const status = ownErrorValue(error, 'status');
+  const correlationId = ownErrorValue(error, 'correlationId');
+  return {
+    ...(typeof status === 'number' &&
+    Number.isInteger(status) &&
+    (status === 0 || (status >= 100 && status <= 599))
+      ? { status }
+      : {}),
+    ...(typeof correlationId === 'string' &&
+    correlationId.length === 36 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      correlationId,
+    )
+      ? { correlationId }
+      : {}),
+  };
 }

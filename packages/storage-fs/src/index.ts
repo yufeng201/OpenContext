@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  constants,
+  fstatSync,
+  readSync,
   existsSync,
   fsyncSync,
   mkdirSync,
@@ -12,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, resolve, relative, sep, isAbsolute } from 'node:path';
-import type { FileEntry } from '@opencontext/contracts';
+import { TEXT_READ_MAX_BYTES, type FileEntry } from '@opencontext/contracts';
 
 function rejectLink(path: string): void {
   try {
@@ -32,6 +35,7 @@ function syncDirectory(path: string): void {
     closeSync(fd);
   }
 }
+export const MAX_TEXT_READ_BYTES = TEXT_READ_MAX_BYTES;
 export class FileStore {
   readonly root: string;
   constructor(dataRoot: string) {
@@ -91,12 +95,32 @@ export class FileStore {
   }
   readText(contentHash: string): string {
     if (!/^[a-f0-9]{64}$/.test(contentHash)) throw new Error('INVALID_HASH');
-    const bytes = readFileSync(
+    const fd = openSync(
       this.path('blobs', contentHash.slice(0, 2), contentHash),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
-    if (hash(bytes) !== contentHash) throw new Error('CORRUPT_OBJECT');
-    return bytes.toString('utf8');
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size > MAX_TEXT_READ_BYTES)
+        throw new Error('BYTE_LIMIT');
+      const buffer = Buffer.alloc(stat.size + 1);
+      let count = 0;
+      while (count < buffer.length) {
+        const n = readSync(fd, buffer, count, buffer.length - count, null);
+        if (!n) break;
+        count += n;
+      }
+      if (count > stat.size) throw new Error('BYTE_LIMIT');
+      const bytes = buffer.subarray(0, count);
+      if (hash(bytes) !== contentHash) throw new Error('CORRUPT_OBJECT');
+      return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+        bytes,
+      );
+    } finally {
+      closeSync(fd);
+    }
   }
+
   revision(file: FileEntry): void {
     const {
       fileId,
