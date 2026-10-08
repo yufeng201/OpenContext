@@ -5,10 +5,16 @@ FROM ${NODE_IMAGE}
 # Reviewed base must include Git for the approved repository connector.
 RUN node -e "if(process.version!=='v24.19.0')process.exit(1)" && git --version
 ARG PNPM_VERSION=11.19.0
-RUN npm install --global pnpm@${PNPM_VERSION} --ignore-scripts
+# Optional build-only CA: --secret id=npm_ca,src=/reviewed/existing-ca.pem
+# BuildKit mounts the file only for these install steps; never COPY or persist it.
+RUN --mount=type=secret,id=npm_ca \
+    if [ -f /run/secrets/npm_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca; fi; \
+    npm install --global pnpm@${PNPM_VERSION} --ignore-scripts
 WORKDIR /opt/opencontext
 COPY --chown=node:node . .
-RUN pnpm install --prod --frozen-lockfile --ignore-scripts
+RUN --mount=type=secret,id=npm_ca \
+    if [ -f /run/secrets/npm_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca; fi; \
+    pnpm install --prod --frozen-lockfile --ignore-scripts
 USER node
 ENV NODE_ENV=production OPENCONTEXT_BIND_HOST=0.0.0.0 OPENCONTEXT_DATA_ROOT=/var/lib/opencontext OPENCONTEXT_OWNER_TOKEN_FILE=/run/opencontext-owner PORT=4310
 EXPOSE 4310
