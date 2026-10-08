@@ -3,6 +3,7 @@ import {
   parseReadQuery,
 } from '@opencontext/contracts/query-api';
 import { disclose } from './disclosure.ts';
+import { ReadAdmission } from './read-admission.ts';
 import type { ReadOptions } from '@opencontext/contracts';
 import {
   CURRENT_STORAGE_VERSION,
@@ -79,6 +80,8 @@ export type ApplicationOptions = {
   autoStart?: boolean;
   /** Server-owned deadline; clients cannot choose resource budgets. */
   connectionTestTimeoutMs?: number;
+  /** Server-owned read response lifetime; only tightening 10–15000ms is allowed. */
+  readResponseTimeoutMs?: number;
   registry?: StaticRegistry;
   /** Reviewed server-side dependency injection; never accepted by a client body. */
   feishu?: Omit<FeishuChatOptions, 'stateRoot'>;
@@ -179,6 +182,8 @@ export function createApplication(options: ApplicationOptions) {
     requestIdHeader: false,
     ajv: { customOptions: { removeAdditional: false, coerceTypes: false } },
   });
+  const readAdmission = new ReadAdmission(options.readResponseTimeoutMs);
+  const currentRequests = new WeakMap<Principal, FastifyRequest>();
   const currentCredentials = new WeakMap<Principal, string>();
   const requestPrincipals = new WeakMap<FastifyRequest, Principal>();
   const requestCodes = new WeakMap<FastifyRequest, string>();
@@ -239,6 +244,7 @@ export function createApplication(options: ApplicationOptions) {
       principal = catalog.authenticate(token, options.ownerToken);
     if (!principal) throw new Error('UNAUTHORIZED');
     currentCredentials.set(principal, token);
+    currentRequests.set(principal, request);
     requestPrincipals.set(request, principal);
     return principal;
   }
@@ -367,10 +373,14 @@ export function createApplication(options: ApplicationOptions) {
           : catalog.getRevisionCommit(projectId, fileId, revisionId);
       if (!commitId) throw new Error('NOT_FOUND');
       if (file.bytes > MAX_TEXT_READ_BYTES) throw new Error('BYTE_LIMIT');
+      const request = currentRequests.get(principal);
+      if (!request) throw new Error('UNAUTHORIZED');
+      readAdmission.acquire(request, projectId, file, options);
       const text = store.readText(file.contentHash);
       if (createHash('sha256').update(text).digest('hex') !== file.contentHash)
         throw new Error('CORRUPT_OBJECT');
       authorize(principal, projectId);
+      readAdmission.check(request);
       return {
         file,
         ...disclose(text, file.logicalPath, options),
@@ -412,7 +422,8 @@ export function createApplication(options: ApplicationOptions) {
       );
     },
   };
-  app.addHook('onRequest', (request, _reply, done) => {
+  app.addHook('onRequest', (request, reply, done) => {
+    readAdmission.bind(request, reply);
     const host = request.headers.host ?? '';
     let hostname: string;
     try {
@@ -448,6 +459,7 @@ export function createApplication(options: ApplicationOptions) {
     done();
   });
   app.addHook('onResponse', (request, reply, done) => {
+    readAdmission.release(request);
     const route = request.routeOptions.url ?? '';
     if (
       !criticalRequests.has(request) &&
@@ -500,6 +512,7 @@ export function createApplication(options: ApplicationOptions) {
               ? 'INVALID_SCHEMA'
               : safeErrorCode(error);
     requestCodes.set(request, code);
+    if (code === 'RESOURCE_BUSY') reply.header('Retry-After', '1');
     const status =
       code === 'INVALID_RESPONSE'
         ? 500
@@ -1085,6 +1098,7 @@ export function createApplication(options: ApplicationOptions) {
   });
   // Stop claiming/cancel native work before waiting for already accepted HTTP requests.
   app.addHook('preClose', async () => {
+    readAdmission.close();
     await coordinator.stop();
   });
   app.addHook('onClose', async () => {
@@ -1096,5 +1110,13 @@ export function createApplication(options: ApplicationOptions) {
     auditDispatcher.start();
     coordinator.start();
   }
-  return { app, catalog, store, coordinator, services, auditDispatcher };
+  return {
+    app,
+    catalog,
+    store,
+    coordinator,
+    services,
+    auditDispatcher,
+    readAdmission,
+  };
 }

@@ -76,3 +76,13 @@ SDK错误始终是新建闭合对象，CLI另行投影metadata：只保留有限
 ## 默认先有限披露
 
 新Agent接入先分页发现文件和搜索短片段；对于Markdown，先`context_read`传`outline: true, maxBytes: 4096`取得确定性标题目录，再按行/章节读取8KiB以内片段，必要时用offset续读及追溯原件。固定revision不能省略。全文是显式选择；旧客户端全文行为仍兼容。参数、片段hash与全文hash区别、Reader入口及16MiB对象预检见[渐进披露契约](PROGRESSIVE_CONTEXT.md)。这不是已认证模型自主调用验收。
+
+## 跨请求正文读取准入
+
+REST read、MCP read及grep实际读正文共享每个应用实例的准入，位于当前project/source/revision授权之后、存储正文分配之前。无新选择器的全文且对象≥1MiB，或FileEntry编码metadata≥1MiB，归为重请求；全局最多1个重读（因此每空间也至多1个）。8KiB默认/最多64KiB片段、标题目录及较小全文使用独立轻量通道：全局4个、每空间2个；巨大metadata不能靠小正文选择器绕开重通道。重读不会消耗轻量名额。没有排队，没有自动重试。
+
+每个HTTP请求只计一次，grep从小对象转入大对象时在大正文分配前原子升级且不降级。许可持有到响应finish/close，涵盖JSON/MCP序列化及网络背压，而非读取磁盘后立即释放。超额在读正文前返回RESOURCE_BUSY：REST429加Retry-After:1；MCP仍按JSON-RPC返回同码错误（HTTP200协议外壳），不返回截断正文或扩大权限。调用方可退避后显式重试；Retry-After不是1秒后一定成功的容量承诺。
+
+响应许可默认15秒，从首次准入开始，不因重复服务读取续期；内部服务器配置readResponseTimeoutMs仅允许10–15000ms收紧，客户端不能指定。客户端abort、响应close/error或停服会终止并释放；期限到达先destroy响应再释放，已开始写入时可能体现为连接中断/SDK REQUEST_FAILED或TIMEOUT，而不是可解析JSON错误。单调时钟检查配合timer；同步CPU/FS/SQLite不能被强抢占，计时器在event loop恢复后才能运行。
+
+受控1MiB NUL小规模测量确认未保护时两个并发MCP全文都读正文并保留大响应；保护后只执行一个，另一个RESOURCE_BUSY；暂停大响应时64字节片段仍200并完成。测量使用最多3请求/两个自有Node进程和heap/RSS/期限保护，不把这次样本外推成16MiB实际峰值、生产吞吐或并发SLO。16MiB NUL每个MCP结果仅编码正文就约208MiB，服务端有多份中间值，许可计数不是OS/RSS配额；启动heap/磁盘检查也不保证峰值内存。分段仍先读/hash整个≤16MiB对象，低成本指有限返回体。未覆盖其他HTTP入口的全局速率或多实例聚合配额。实现测试见tests/integration/read-admission.test.ts与read-admission-http.test.ts。
