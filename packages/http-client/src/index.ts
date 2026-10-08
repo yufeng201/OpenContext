@@ -30,6 +30,8 @@ import {
   parseQueryResponse,
   parseQueryError,
   QUERY_RESPONSE_MAX_BYTES,
+  READ_RESPONSE_MAX_BYTES,
+  queryResponseMaxBytes,
   type FilePage,
   type FilePageInput,
   projectQueryPath,
@@ -118,11 +120,11 @@ export class OpenContextClient {
         this.timeoutMs > 15000
       )
         throw new Error('INVALID_TIMEOUT');
-      this.maximum = options.maxResponseBytes ?? QUERY_RESPONSE_MAX_BYTES;
+      this.maximum = options.maxResponseBytes ?? READ_RESPONSE_MAX_BYTES;
       if (
         !Number.isInteger(this.maximum) ||
         this.maximum < 128 ||
-        this.maximum > QUERY_RESPONSE_MAX_BYTES
+        this.maximum > READ_RESPONSE_MAX_BYTES
       )
         throw new Error('INVALID_RESPONSE_LIMIT');
       this.base = url.origin;
@@ -232,6 +234,10 @@ export class OpenContextClient {
       }
       check();
       const errorStatus = !response.ok && response.status !== diagnosticStatus;
+      const maximum = Math.min(
+        this.maximum,
+        errorStatus ? QUERY_RESPONSE_MAX_BYTES : queryResponseMaxBytes(schema),
+      );
       let data: unknown;
       try {
         if (
@@ -248,11 +254,11 @@ export class OpenContextClient {
         const length = response.headers.get('content-length');
         if (
           length !== null &&
-          (!/^\d+$/.test(length) || Number(length) > this.maximum)
+          (!/^\d+$/.test(length) || Number(length) > maximum)
         )
           throw new OpenContextError(
             response.status,
-            Number(length) > this.maximum
+            Number(length) > maximum
               ? 'RESPONSE_TOO_LARGE'
               : 'INVALID_RESPONSE',
           );
@@ -275,7 +281,7 @@ export class OpenContextClient {
           if (!(part.value instanceof Uint8Array))
             throw new OpenContextError(response.status, 'INVALID_RESPONSE');
           size += part.value.byteLength;
-          if (size > this.maximum)
+          if (size > maximum)
             throw new OpenContextError(response.status, 'RESPONSE_TOO_LARGE');
           let offset = 0;
           while (offset < part.value.byteLength) {
@@ -284,7 +290,7 @@ export class OpenContextClient {
               current = new Uint8Array(
                 Math.min(
                   65536,
-                  this.maximum - (size - part.value.byteLength + offset),
+                  maximum - (size - part.value.byteLength + offset),
                 ),
               );
               segments.push(current);

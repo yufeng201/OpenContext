@@ -16,6 +16,7 @@ import { Value } from '@sinclair/typebox/value';
 import {
   parseQueryResponse,
   QUERY_RESPONSE_MAX_BYTES,
+  MCP_READ_RESPONSE_MAX_BYTES,
   FilePageSchema,
   FilePageInputSchema,
   TreeSchema,
@@ -237,7 +238,10 @@ export function registerMcp(app: FastifyInstance, handlers: McpHandlers): void {
           structuredContent: result,
         };
         if (
-          Buffer.byteLength(JSON.stringify(output)) > QUERY_RESPONSE_MAX_BYTES
+          Buffer.byteLength(JSON.stringify(output)) >
+          (message.params.name === 'context_read'
+            ? MCP_READ_RESPONSE_MAX_BYTES
+            : QUERY_RESPONSE_MAX_BYTES)
         )
           throw new Error('RESPONSE_TOO_LARGE');
         handlers.audit?.(request, message.params.name, args, 'OK');

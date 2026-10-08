@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, resolve, relative, sep, isAbsolute } from 'node:path';
-import type { FileEntry } from '@opencontext/contracts';
+import { TEXT_READ_MAX_BYTES, type FileEntry } from '@opencontext/contracts';
 
 function rejectLink(path: string): void {
   try {
@@ -35,7 +35,7 @@ function syncDirectory(path: string): void {
     closeSync(fd);
   }
 }
-export const MAX_TEXT_READ_BYTES = 16 * 1024 * 1024;
+export const MAX_TEXT_READ_BYTES = TEXT_READ_MAX_BYTES;
 export class FileStore {
   readonly root: string;
   constructor(dataRoot: string) {

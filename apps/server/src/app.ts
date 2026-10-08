@@ -509,7 +509,7 @@ export function createApplication(options: ApplicationOptions) {
             ? 409
             : code === 'UNSUPPORTED_MEDIA_TYPE'
               ? 415
-              : code === 'PAYLOAD_TOO_LARGE'
+              : code === 'PAYLOAD_TOO_LARGE' || code === 'BYTE_LIMIT'
                 ? 413
                 : ['RESOURCE_BUSY', 'QUEUE_FULL'].includes(code)
                   ? 429

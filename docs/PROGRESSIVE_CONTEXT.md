@@ -23,7 +23,7 @@
 
 section 不能与行参数混用。返回 `disclosure` 包含选择模式、起始行、全文/选择/返回字节数、offsetBytes、nextOffsetBytes 和返回片段 textHash。nextOffsetBytes=null 表示选定范围结束，不代表已经读完整个文件。非null 时重用同样 file/revision/section 或行范围，仅更新 offsetBytes，直到该范围完成。
 
-citation.contentHash 和 file.contentHash **始终是完整原文件 hash**，片段只用 disclosure.textHash 校验。SDK验证返回片段hash、字节数及请求预算，拒绝服务器忽略选择器返回全文；不能用片段重算全文hash，也不把片段保存成一个新的正式 revision。旧客户端不懂新增 disclosure 时应继续只用旧全文调用。预算约束的是返回正文；JSON元数据另受现有响应上限约束。服务端当前仍先读取并校验完整存储对象，不宣称流式磁盘读取或只读取片段的I/O成本。
+citation.contentHash 和 file.contentHash **始终是完整原文件 hash**，片段只用 disclosure.textHash 校验。SDK验证返回片段hash、字节数及请求预算，拒绝服务器忽略选择器返回全文；不能用片段重算全文hash，也不把片段保存成一个新的正式 revision。旧客户端不懂新增 disclosure 时应继续只用旧全文调用。预算约束的是返回正文；编码传输另有有限预算：正文对象16MiB，read JSON112MiB（最坏6倍转义+16MiB metadata），MCP工具结果256MiB+1024字节（重复与再次转义），其他查询16MiB。SDK/CLI默认支持该正文范围的合法UTF-8全文；自定义更紧响应预算、期限或工作量限制仍可拒绝。正文超限413 BYTE_LIMIT，传输预算超限RESPONSE_TOO_LARGE，不截断成功返回；超过对象上限不能靠片段读取绕过。详见[查询接入](QUERY_ACCESS.md)。服务端当前仍先读取并校验完整存储对象，不宣称流式磁盘读取或只读取片段的I/O成本。
 
 Reader默认8KiB有限读取，展示章节目录，可点击标题按行读取，点击“读取下一段”续读或显式“读取全文”。刷新固定引用仍从有限读取开始；续读片段采用惰性文本呈现，避免缺少围栏前文时误解Markdown结构。
 

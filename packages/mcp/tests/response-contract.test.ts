@@ -6,7 +6,7 @@ import type { ReadResult } from '@opencontext/contracts';
 for (const mode of ['extra', 'hash', 'budget'] as const)
   it(`real MCP wire rejects ${mode} response without raw text or success audit`, async () => {
     const secret = 'PRIVATE_UPSTREAM_SENTINEL',
-      text = mode === 'budget' ? secret + 'x'.repeat(8500000) : secret;
+      text = mode === 'budget' ? secret + 'x'.repeat(16 * 1024 * 1024) : secret;
     const file = {
       fileId: 'f1',
       revisionId: 'r1',
@@ -80,10 +80,10 @@ for (const mode of ['extra', 'hash', 'budget'] as const)
       const result = JSON.parse(raw);
       expect(result.result).toBeUndefined();
       expect(result.error.message).toBe(
-        mode === 'budget' ? 'RESPONSE_TOO_LARGE' : 'INVALID_RESPONSE',
+        mode === 'budget' ? 'BYTE_LIMIT' : 'INVALID_RESPONSE',
       );
       expect(audits).toEqual([
-        mode === 'budget' ? 'RESPONSE_TOO_LARGE' : 'INVALID_RESPONSE',
+        mode === 'budget' ? 'BYTE_LIMIT' : 'INVALID_RESPONSE',
       ]);
     } finally {
       await app.close();

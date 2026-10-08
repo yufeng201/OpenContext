@@ -3,6 +3,7 @@ import { Value } from '@sinclair/typebox/value';
 import { isErrorCode } from './errors.ts';
 import {
   Id,
+  TEXT_READ_MAX_BYTES,
   SearchSchema,
   ReadSchema,
   ProjectSchema,
@@ -89,7 +90,21 @@ export function assertReadSelection(
     throw new Error('INVALID_RESPONSE');
 }
 
-export const QUERY_RESPONSE_MAX_BYTES = 16777216;
+export const QUERY_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
+// Read JSON may escape each UTF-8 body byte as six ASCII bytes (e.g. NUL).
+// Metadata has its own finite allowance; other query operations keep 16MiB.
+export const READ_METADATA_MAX_BYTES = QUERY_RESPONSE_MAX_BYTES;
+export const READ_RESPONSE_MAX_BYTES =
+  6 * TEXT_READ_MAX_BYTES + READ_METADATA_MAX_BYTES;
+// MCP duplicates JSON and string-escapes it again: at most 13 bytes/body byte,
+// plus at most three copies of encoded metadata and a fixed tool wrapper.
+export const MCP_READ_RESPONSE_MAX_BYTES =
+  13 * TEXT_READ_MAX_BYTES + 3 * READ_METADATA_MAX_BYTES + 1024;
+export function queryResponseMaxBytes(schema: TSchema): number {
+  return schema === ReadResultSchema
+    ? READ_RESPONSE_MAX_BYTES
+    : QUERY_RESPONSE_MAX_BYTES;
+}
 export const ProjectsSchema = Type.Array(ProjectSchema, { maxItems: 20000 });
 export const TreeSchema = Type.Array(FileEntrySchema, { maxItems: 20000 });
 export const EmptyQuerySchema = Type.Object(
@@ -166,10 +181,19 @@ export function parseQueryResponse<T extends TSchema>(
     limit?: number;
   } = {},
 ): Static<T> {
+  if (
+    (schema as TSchema) === ReadResultSchema &&
+    value !== null &&
+    typeof value === 'object' &&
+    'text' in value &&
+    typeof value.text === 'string' &&
+    new TextEncoder().encode(value.text).length > TEXT_READ_MAX_BYTES
+  )
+    throw new Error('BYTE_LIMIT');
   if (!Value.Check(schema, value)) throw new Error('INVALID_RESPONSE');
   if (
     new TextEncoder().encode(JSON.stringify(value)).length >
-    QUERY_RESPONSE_MAX_BYTES
+    queryResponseMaxBytes(schema)
   )
     throw new Error('RESPONSE_TOO_LARGE');
   const file = (f: FileEntry, history = false) => {
@@ -202,6 +226,12 @@ export function parseQueryResponse<T extends TSchema>(
     for (const f of value as FileEntry[]) file(f);
   } else if ((schema as TSchema) === ReadResultSchema) {
     const r = value as Static<typeof ReadResultSchema>;
+    if (r.file.bytes > TEXT_READ_MAX_BYTES) throw new Error('BYTE_LIMIT');
+    if (
+      new TextEncoder().encode(JSON.stringify({ ...r, text: '' })).length >
+      READ_METADATA_MAX_BYTES
+    )
+      throw new Error('RESPONSE_TOO_LARGE');
     citation(r.file, r.citation, true);
     const d = r.disclosure;
     if (r.outline && d?.mode !== 'outline') throw new Error('INVALID_RESPONSE');
@@ -408,13 +438,15 @@ export const QueryOpenApi = {
         ],
         responses: {
           '200': response(
-            'ReadResult; supplied immutable revision, current source/project gate.',
+            'ReadResult; fixed revision and current gate. UTF-8 body <=16MiB, encoded read JSON <=112MiB (metadata <=16MiB). BYTE_LIMIT/RESPONSE_TOO_LARGE reject without truncation; use bounded selectors for large reads.',
             ReadResultSchema,
           ),
           '400': error,
           '401': error,
           '403': error,
           '404': error,
+          '413': error,
+          '503': error,
         },
       },
     },

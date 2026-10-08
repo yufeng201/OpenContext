@@ -1,3 +1,5 @@
+/** Maximum UTF-8 object body accepted by text reads, before transport encoding. */
+export const TEXT_READ_MAX_BYTES = 16 * 1024 * 1024;
 import { Type, type Static } from '@sinclair/typebox';
 import type { PluginInstanceLock, ExecutionLock } from './plugins.ts';
 export * from './plugins.ts';

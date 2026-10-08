@@ -25,7 +25,7 @@ pnpm cli read PROJECT_ID FILE_ID REVISION_ID
 
 ## TypeScript源码SDK
 
-`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。解码响应上限16MiB（maxResponseBytes可收紧至128字节）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
+`packages/http-client/src/index.ts`提供OpenContextClient及OpenContextError，当前是Node24仓库内私有只读源码包，未发布npm。Node24可直接运行TypeScript。构造参数baseUrl必须只有origin，不接受userinfo、query或path；明文HTTP只允许loopback，远程必须HTTPS。所有请求禁止redirect，默认限时15秒；同一计时覆盖连接、响应头和响应体读取，调用方可传AbortSignal取消；timeoutMs可在10–15000毫秒内缩短。read成功响应的编码JSON上限112MiB，其他查询和错误响应仍为16MiB（maxResponseBytes默认112MiB，可收紧至128字节；实际按操作取较小上限）；只接受application/json及有效UTF-8，超限或无效JSON只返回稳定错误码，以免Bearer跟随跳转或错误正文进入日志。
 
 方法：readiness()（owner-only，503返回依赖报告）、projects()、tree(projectId)、search(projectId,input)、read(projectId,fileId,revisionId)、filesPage(projectId,{limit,cursor})。所有方法最后可传{signal}。SearchInput、FileEntry、SearchResult、ReadResult来自contracts。先search，再将命中里的fileId/revisionId交给read，核对citation；错误包含status/code/correlationId，没有任意上游错误文本。成功响应、错误、分页和固定revision共享TypeBox schema，额外字段/未知形状拒绝而非静默丢弃；全文read复核正文UTF-8长度和SHA256；有限读取复核disclosure返回字节及textHash（完整文件hash保持在citation中），citation必须与文件/所请求revision一致。readiness单独使用共享TypeBox响应契约和稳定故障码白名单，拒绝任意503错误正文。Python SDK后续从同一API契约实现，当前未提供。
 
@@ -61,7 +61,9 @@ pnpm exec vitest run tests/integration/query-response.test.ts tests/integration/
 
 请求body/query和响应中的额外字段明确拒绝。JSON错误、错误media type、无效UTF-8、协议字段/固定revision错误均只暴露稳定码，不回显原正文/URL/abort reason。CLI收到SIGINT/SIGTERM取消；SDK非合作transport也有deadline竞争和晚到响应体清理。网络断开不会成为对同步native代码的抢占式终止保证。
 
-共享成功payload最多16MiB；MCP的text+structuredContent重复包装另按16MiB工具结果预算检查，因此大文件在MCP可能比REST更早拒绝；JSON-RPC transport元数据另有请求上限。超限不能返回截断成功结果。搜索limit仍只是最多命中数，4096 excerpt预算和默认10条保持，不能当总数/搜索分页；本批分页仅限文件集合，projects/search分页尚未提供。
+正文与传输预算分开：UTF-8正文/存储对象最多16MiB；read编码JSON最多112MiB（6×16MiB最坏JSON转义 + 16MiB编码metadata余量）；MCP read的text+structuredContent工具结果最多256MiB+1024字节（13×16MiB正文重复/再次转义 + 3×16MiB metadata + 包装余量）。共享read校验还分别检查正文与metadata。实际文本未重复计入正文上限。其他查询/错误响应的16MiB预算保持。SDK/CLI默认预算覆盖以上16MiB内合法UTF-8全文，Web/REST/MCP使用相同正文与metadata契约；自定义maxResponseBytes只收紧，不扩大操作上限。旧16MiB ASCII及8MiB引号不会仅因JSON编码成本被拒绝。
+
+正文超限返回413 BYTE_LIMIT（MCP为同码协议错误）；编码预算超限为RESPONSE_TOO_LARGE（服务端503，SDK本地拒绝保留所见HTTP状态）。不返回截断成功结果。maxBytes/offsetBytes用于上限内对象的按需读取；超过16MiB的对象即使请求片段也拒绝，不能靠分页绕过对象读上限。客户端主动收紧预算、8192次读取工作量或15秒期限也会拒绝合法大响应，调用方可改用有限选择器，不能承诺任意慢网络/碎片化transport成功。传输上限是有限编码预算，不是整个进程峰值内存上限或并发SLO。JSON-RPC请求另有上限。搜索limit仍只是最多命中数，4096 excerpt预算和默认10条保持，不能当总数/搜索分页；本批分页仅限文件集合，projects/search分页尚未提供。
 
 明确的来源历史read保留现有授权语义：来源已删除但binding仍获授权时，固定历史内容可读，其metadata可保留tombstone/invalid；不把freshness当授权凭据。树/搜索仍排除这些条目，无效派生产物及撤源后的历史均拒绝。SDK的schema例外只接纳服务器授权后返回的明确来源历史，不能代替服务器ACL。
 
