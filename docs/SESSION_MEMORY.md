@@ -140,7 +140,7 @@ pnpm session-memory watch /tmp/opencontext-memory-example/config.json 3 1000
 
 ## 本地 Agent 任务与人工审核
 
-`sync` 成功返回 `pending`、`taskId` 和 `taskPath`。数据根的 `plugin-state/session-memory/task.json` 是文件交接协议，`response-schema.json` 是 TypeBox 导出的 JSON Schema。将这两个文件明确交给用户自己的本地 Agent；本工具不启动 CLI、不调用模型、不读取 Agent 登录状态。Agent 只读取该任务并在导出目录之外写一个响应 JSON。
+`sync` 成功返回 `pending`、`taskId` 和 `taskPath`。数据根的 `plugin-state/session-memory/task.json` 是文件交接协议，`response-schema.json` 是 TypeBox 导出的 JSON Schema。将这两个文件明确交给用户自己的本地 Agent；原有 sync/submit 命令不启动 CLI、不调用模型、不读取 Agent 登录状态；新增显式 worker 适配器见下文。Agent 只读取该任务并在导出目录之外写一个响应 JSON。
 
 任务包含项目、绑定、输入 commit、内容指纹及消息的 fileId/revisionId/contentHash。消息已通过原始导出证明；将其当作不可信证据，而不是执行指令。返回协议为 `opencontext.local-agent-response/v1`：回传 `taskId`、`inputHash`，并给出 `candidates`。每项只有 `fileId`、`revisionId`、`kind`（memory/rule/experience）、`line`（消息内的证据行）和 `markdown`。最多 200 项、每项 16 KiB；未知字段、跨来源引用、重复槽位、空内容和越界行都拒绝。worker 不能选择输出路径、所有权、审核状态或系统指令。
 
@@ -170,7 +170,7 @@ pnpm session-memory cancel /tmp/opencontext-memory-example/config.json
 pnpm session-memory retry /tmp/opencontext-memory-example/config.json
 ```
 
-`retry` 先重新同步，再生成新 taskId，旧响应不能复用。不会自动重试模型调用；本工具本身没有模型调用。来源变化生成新任务并清除旧审核结果；固定来源版本变化、绑定撤销和发布竞争都拒绝。来源目录在审核后变化但尚未同步时，批准仍针对库内固定快照；若要纳入磁盘最新内容，先 sync 再处理新任务。
+`retry` 先重新同步，再生成新 taskId，旧响应不能复用。不会自动重试模型调用；原有同步命令本身没有模型调用。来源变化生成新任务并清除旧审核结果；固定来源版本变化、绑定撤销和发布竞争都拒绝。来源目录在审核后变化但尚未同步时，批准仍针对库内固定快照；若要纳入磁盘最新内容，先 sync 再处理新任务。
 
 state.json 用原子替换和 fsync 保存操作断点；它与 task/schema/review 同属联合备份的 plugin-state。原文及 Markdown 内容仍由 FileStore 维护，索引可由现有 outbox 重建。重启不重新提炼未变内容；任务文件写入中断可通过 sync 补齐。发布完成而断点未落盘时以 host run 的 published 状态恢复；未完成发布一律失败关闭，需要重试及重新审核。Ctrl+C 停止本次受控工作，不会终止用户单独启动的 Agent；随后 cancel 可作废未提交任务。
 
@@ -181,3 +181,22 @@ state.json 用原子替换和 fsync 保存操作断点；它与 task/schema/revi
 停止操作 CLI/轮询后，可用已有私有服务器配置启动同一数据根，再使用现有 CLI/MCP：先 search 获取带版本的候选，read outline 查看结构，read section 或行范围展开必要内容，最后按固定引用追溯原始导出。查询仍遵循当前来源授权和 freshness 门禁；未审核响应不会出现在搜索中。不要为本演练创建真实凭据；测试使用临时合成 owner 字符串。
 
 实现测试位于 `tests/integration/session-memory.test.ts`：覆盖合成完整链路、审核前不可召回、固定来源、原文字节、重启去重、坏响应、取消、重试和单写者拒绝。模拟 worker 只生成预定测试文本，不证明真实模型理解、自动导出、原生 session 兼容性或提炼质量。全量检查用 `pnpm check`。这是受控个人实例的最小文件交接实现，不是无人工审核的持续学习系统或工业级部署证明。
+
+## 显式本地 Codex worker（软件契约，尚未真实模型验收）
+
+新增 `session-memory:worker` 命令只在 `run` / `retry` 且带 `--execute-model` 时启动进程；prepare/status/cancel/submit 不调用模型。没有 daemon、Hook、自动重试或配置写入。当前测试全部使用 fake 可执行程序与合成任务，没有读取现有认证或运行真实 Codex。
+
+1. 使用已有在线 `task` 命令导出当前服务器任务 JSON，交给 `pnpm session-memory:worker prepare TASK_JSON`。返回独立私有临时 JOB_DIR，固定任务 hash；新建空 codex-home/runtime-home，不复制用户配置或登录文件。
+2. 真实启用是后续独立授权步骤：先确认固定官方 Codex **0.161.0**，以及专用 JOB_DIR/codex-home 的认证、消费方式和系统沙箱能力。若没有专用登录就停止，不能借用现有 HOME 认证或回退到 API key；本轮不执行认证或模型命令。
+3. 将服务端 owner/query 凭据从执行进程环境移除，再显式运行 `pnpm session-memory:worker run JOB_DIR --execute-model`。失败后只有显式 `retry JOB_DIR --execute-model` 才能再执行，每个 job 最多三次。成功后同一任务返回已验证缓存，不重新启动进程。
+4. 在独立、持有既有 owner 凭据的命令进程执行 `pnpm session-memory:worker submit JOB_DIR`。它只连接 OPENCONTEXT_URL（默认 loopback），重新获取并比对完整当前任务，然后提交响应。迟到任务在客户端和服务器再次拒绝。submit 永远不启动 worker，也不批准发布；仍须人工审阅当前 reviewHash 并单独 approve。
+
+固定调用使用 structured argv、shell:false、stdin JSON 证据，官方 `exec --strict-config --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --sandbox read-only --color never --cd ... --output-schema ... --output-last-message ... -`。另固定禁用 shell、工具搜索、MCP、应用、插件、子 Agent、Hook、技能指令和 Web 搜索等特性；不接受用户 shell 模板、自定义程序/参数或额外可写目录。参数契约依据固定官方 [exec CLI](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/exec/src/cli.rs)、[共享选项](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/utils/cli/src/shared_options.rs)、[配置 schema](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/core/config.schema.json) 与 [feature 定义](https://github.com/openai/codex/blob/rust-v0.161.0/codex-rs/features/src/lib.rs)。真实 CLI 接受这些组合及运行时工具禁用效果尚未实测，不能把静态核对当作模型沙箱验收。
+
+执行父进程若带 OPENCONTEXT_OWNER_TOKEN 或 OPENCONTEXT_QUERY_TOKEN 即拒绝。子进程仅继承 PATH 和固定私有 HOME/CODEX_HOME/TMPDIR/locale；不传入 API key、NODE_OPTIONS 或服务器 token。PATH 指向的 Codex 必须可信；版本输出不是二进制签名。引导提示与证据分开组装，但提示文字不是权限边界。原生进程仍受当前用户 OS 权限约束，此适配器不是恶意可执行程序的 OS 沙箱，也不保证阻止恶意二进制访问其他同用户文件。
+
+任务上限 4 MiB，逐消息核对规范化 contentHash；inputHash 保持服务端固定身份，提交时比对完整权威任务。响应上限 1 MiB，沿用 TypeBox，候选最多 200 项且每项 16 KiB，核验引用、行号、重复槽位和非空 Markdown。只接收 schema/output 两个尝试文件，符号链接、额外产物及未知字段拒绝。stdout 限 1 MiB，stderr 限 64 KiB 并全部丢弃，只返回白名单错误码；模型执行限 120 秒、版本检查另限 5 秒，超时/取消对 POSIX 进程组 TERM 后 200ms KILL。
+
+`cancel JOB_DIR` 请求取消当前尝试；运行状态在进程停止后变为 cancelled。取消与完成使用同一原子状态锁：完成已占锁时取消返回 RESOURCE_BUSY，已完成则 POLICY_DENIED，不能据失败的取消命令推断任务已取消。SIGINT/SIGTERM 同样停止当前尝试。独立 setsid 后代、父进程被 SIGKILL、物理断电及恶意文件竞争没有 OS 级保障；遗留锁不会自动强拆，应确认进程已退出后重新 prepare 新任务目录。临时 job 含任务及候选，操作员应在工作结束后按私有数据策略清理，不属于服务器联合备份。
+
+合成回归入口 `pnpm demo:session-worker`：fake executable → 固定响应 → 独立提交 → 人工审核门禁。完整 worker 测试还覆盖超时、取消/完成竞争、手动重试、幂等缓存、退出码、stderr 清除、大小/schema/hash/路径拒绝和迟到响应。当前只验证 Linux；Windows 明确拒绝，macOS 未运行验收。JSONL 支持范围不变，工具/compaction/继承或分页记录仍未新增支持。

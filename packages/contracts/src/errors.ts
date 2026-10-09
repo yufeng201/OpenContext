@@ -1,6 +1,11 @@
 /** Only reviewed machine codes may cross an API or persistent diagnostic boundary. */
 const codes = new Set([
   'ACCESS_DENIED',
+  'AGENT_TIMEOUT',
+  'AGENT_START_FAILED',
+  'AGENT_EXIT_FAILED',
+  'UNSUPPORTED_AGENT_VERSION',
+  'UNSUPPORTED_PLATFORM',
   'UPGRADE_REQUIRED',
   'UPGRADE_BASELINE_REQUIRED',
   'NO_UPGRADE_REQUIRED',

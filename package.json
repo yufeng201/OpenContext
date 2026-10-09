@@ -39,7 +39,9 @@
     "release:archive": "node scripts/release-archive.ts",
     "demo:session-jsonl": "vitest run tests/integration/session-jsonl.test.ts -t DEMO",
     "session-memory:upload": "node scripts/session-memory-upload.ts",
-    "demo:session-upload": "vitest run tests/integration/session-upload.test.ts -t DEMO"
+    "demo:session-upload": "vitest run tests/integration/session-upload.test.ts -t DEMO",
+    "session-memory:worker": "node scripts/session-memory-worker.ts",
+    "demo:session-worker": "vitest run tests/integration/local-agent-worker.test.ts -t DEMO"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",
