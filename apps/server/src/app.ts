@@ -69,6 +69,7 @@ import { AgentResponseSchema } from '../../../plugins/session-candidates/src/loc
 import {
   SessionMemoryTaskActionSchema,
   SessionMemoryApprovalSchema,
+  SessionUploadRequestSchema,
 } from '../../../packages/contracts/src/session-memory.ts';
 import {
   createDefaultRegistry,
@@ -741,24 +742,32 @@ export function createApplication(options: ApplicationOptions) {
   }
   for (const command of [
     'sync',
+    'upload',
     'submit',
     'approve',
     'cancel',
     'retry',
   ] as const) {
     const body =
-      command === 'submit'
-        ? AgentResponseSchema
-        : command === 'approve'
-          ? SessionMemoryApprovalSchema
-          : command === 'sync'
-            ? Type.Object({}, { additionalProperties: false })
-            : SessionMemoryTaskActionSchema;
+      command === 'upload'
+        ? SessionUploadRequestSchema
+        : command === 'submit'
+          ? AgentResponseSchema
+          : command === 'approve'
+            ? SessionMemoryApprovalSchema
+            : command === 'sync'
+              ? Type.Object({}, { additionalProperties: false })
+              : SessionMemoryTaskActionSchema;
     app.post<{ Body: Record<string, unknown> }>(
       '/api/session-memory/' + command,
       {
         onRequest: memoryGate,
-        bodyLimit: command === 'submit' ? 4_194_304 : 65_536,
+        bodyLimit:
+          command === 'upload'
+            ? 2_105_344
+            : command === 'submit'
+              ? 4_194_304
+              : 65_536,
         schema: { body },
       },
       async (request) => {
@@ -825,6 +834,9 @@ export function createApplication(options: ApplicationOptions) {
               [
                 'org.opencontext.session-directory@0.1.0',
                 'org.opencontext.session-jsonl-directory@0.1.0',
+                'org.opencontext.session-jsonl-directory-0161@0.1.0',
+                'org.opencontext.session-jsonl-upload@0.1.0',
+                'org.opencontext.session-jsonl-upload-0161@0.1.0',
                 'org.opencontext.reviewed-session-agent@0.1.0',
               ].includes(ref),
           )
@@ -922,6 +934,12 @@ export function createApplication(options: ApplicationOptions) {
       const cancellation = requestCancellation(request, reply);
       try {
         const binding = bindingGate(request);
+        if (
+          binding.connector?.packageRef.startsWith(
+            'org.opencontext.session-jsonl-upload',
+          )
+        )
+          throw new Error('POLICY_DENIED');
         if (!binding.active) throw new Error('BINDING_REVOKED');
         if (
           !binding.connector ||
@@ -976,6 +994,12 @@ export function createApplication(options: ApplicationOptions) {
     '/api/projects/:id/bindings/:bindingId/imports/:objectId',
     (request) => {
       const binding = bindingGate(request);
+      if (
+        binding.connector?.packageRef.startsWith(
+          'org.opencontext.session-jsonl-upload',
+        )
+      )
+        throw new Error('POLICY_DENIED');
       critical(request, (context) =>
         catalog.removeImport(binding.id, request.params.objectId, context),
       );

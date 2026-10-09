@@ -275,7 +275,23 @@ export async function extractCandidates(
       const schema = Type.Object(
         {
           schema: Type.Literal('opencontext.session-transform/v1'),
-          parser: Type.Literal('codex-rollout/0.159.2-legacy-text-v1'),
+          parser: Type.Union([
+            Type.Literal('codex-rollout/0.159.2-legacy-text-v1'),
+            Type.Literal('codex-rollout/0.161.0-legacy-text-v1'),
+          ]),
+          transport: Type.Optional(
+            Type.Object(
+              {
+                profile: Type.Literal('text-projection/v1'),
+                clientPrefixHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+                clientPrefixBytes: Type.Integer({
+                  minimum: 1,
+                  maximum: 1_048_576,
+                }),
+              },
+              { additionalProperties: false },
+            ),
+          ),
           originalHash: Type.String(),
           originalBytes: Type.Integer({ minimum: 1 }),
           canonicalHash: Type.String(),
@@ -289,7 +305,9 @@ export async function extractCandidates(
         proof.canonicalHash !== sha256(raw.text)
       )
         invalidProvenance();
-      nativeProvenance = `Native JSONL completed prefix: [fixed original](oc://space/${uriPart(input.projectId)}/file/${uriPart(native.file.fileId)}@${uriPart(native.file.revisionId)})\n\nOriginal SHA-256: ${proof.originalHash}\n\nParser: ${proof.parser}\n\nTransformation receipt: [fixed receipt](oc://space/${uriPart(input.projectId)}/file/${uriPart(receipt.file.fileId)}@${uriPart(receipt.file.revisionId)})\n\n`;
+      nativeProvenance = `${proof.transport ? 'Uploaded text projection (metadata omitted)' : 'Native JSONL completed prefix'}: [fixed original](oc://space/${uriPart(input.projectId)}/file/${uriPart(native.file.fileId)}@${uriPart(native.file.revisionId)})\n\n${proof.transport ? 'Uploaded projection SHA-256' : 'Original SHA-256'}: ${proof.originalHash}\n\nParser: ${proof.parser}\n\nTransformation receipt: [fixed receipt](oc://space/${uriPart(input.projectId)}/file/${uriPart(receipt.file.fileId)}@${uriPart(receipt.file.revisionId)})\n\n`;
+      if (proof.transport)
+        nativeProvenance += `Client original prefix SHA-256 (unverified declaration): ${proof.transport.clientPrefixHash}\n\nClient prefix bytes: ${proof.transport.clientPrefixBytes}\n\n`;
     }
     const candidates = await extractor.extract(message, {
       signal: context.signal,

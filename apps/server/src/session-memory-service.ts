@@ -1,3 +1,5 @@
+import { SessionUploadRequestSchema } from '../../../packages/contracts/src/session-memory.ts';
+import { validateSessionUpload } from '../../../plugins/session-connector/src/jsonl-upload.ts';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Value } from '@sinclair/typebox/value';
@@ -14,6 +16,8 @@ import {
 import {
   sessionMemory,
   memoryConnector,
+  memoryVersion,
+  memoryBindingConfig,
   SessionMemoryConfigSchema,
   MemoryStateSchema,
   type SessionMemoryConfig,
@@ -35,6 +39,14 @@ export class SessionMemoryService {
       !Value.Check(SessionMemoryConfigSchema, config) ||
       resolve(config.dataRoot) !== resolve(dataRoot)
     )
+      throw new Error('INVALID_CONFIG');
+    if (
+      config.inputMode === 'upload' &&
+      (config.directory !== undefined ||
+        !config.format?.startsWith('codex-jsonl-'))
+    )
+      throw new Error('INVALID_CONFIG');
+    if (config.inputMode !== 'upload' && !config.directory)
       throw new Error('INVALID_CONFIG');
     if (config.enabled && !privateMode) throw new Error('POLICY_DENIED');
     this.config = structuredClone(config);
@@ -79,6 +91,15 @@ export class SessionMemoryService {
     return {
       enabled: this.config.enabled,
       format: this.config.format ?? 'v1',
+      inputMode: this.config.inputMode ?? 'directory',
+      uploadId:
+        this.config.inputMode === 'upload' && state && catalog
+          ? (catalog.listImports(state.bindingId)[0]?.id ?? null)
+          : null,
+      uploadHash:
+        this.config.inputMode === 'upload' && state && catalog
+          ? (catalog.listImports(state.bindingId)[0]?.contentHash ?? null)
+          : null,
       directory: this.config.directory,
       projectScope: this.config.projectScope,
       active: this.active !== undefined,
@@ -126,6 +147,20 @@ export class SessionMemoryService {
     host: Omit<MemoryHost, 'setApproval'>,
   ) {
     if (!this.config.enabled) throw new Error('POLICY_DENIED');
+    if (command === 'upload') {
+      if (this.config.inputMode !== 'upload') throw new Error('POLICY_DENIED');
+      if (!Value.Check(SessionUploadRequestSchema, argument))
+        throw new Error('INVALID_IMPORT');
+      validateSessionUpload(
+        argument.upload,
+        this.config.projectScope,
+        memoryVersion(this.config),
+      );
+      await memoryConnector(this.config).validateImport!(
+        JSON.stringify(argument.upload),
+        memoryBindingConfig(this.config),
+      );
+    }
     const key = JSON.stringify([command, argument]);
     if (this.active) {
       if (key !== this.activeKey) throw new Error('RESOURCE_BUSY');
@@ -133,11 +168,34 @@ export class SessionMemoryService {
       return this.inspect(host.catalog);
     }
     const state = this.state();
-    if (!state && command !== 'sync') throw new Error('NOT_FOUND');
+    if (!state && !['sync', 'upload'].includes(command))
+      throw new Error('NOT_FOUND');
+    if (
+      !state &&
+      command === 'upload' &&
+      typeof argument === 'object' &&
+      (argument.expectedUploadHash !== null ||
+        argument.expectedUploadId !== null)
+    )
+      throw new Error('IMPORT_CONFLICT');
     if (state) {
       const binding = host.catalog.getBinding(state.bindingId);
       if (!binding?.active || binding.projectId !== state.projectId)
         throw new Error('BINDING_REVOKED');
+      if (
+        command === 'upload' &&
+        typeof argument === 'object' &&
+        argument.upload
+      ) {
+        const current = host.catalog.listImports(state.bindingId)[0];
+        const hash = current?.contentHash ?? null;
+        if (
+          hash !== agentHash(argument.upload) &&
+          (hash !== argument.expectedUploadHash ||
+            (current?.id ?? null) !== argument.expectedUploadId)
+        )
+          throw new Error('IMPORT_CONFLICT');
+      }
     }
     if (
       command === 'approve' &&

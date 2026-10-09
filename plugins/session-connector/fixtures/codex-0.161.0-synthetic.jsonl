@@ -1,0 +1,7 @@
+{"timestamp":"2026-10-09T00:00:00Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000161","session_id":"00000000-0000-4000-8000-000000000161","timestamp":"2026-10-09T00:00:00Z","cwd":"/Users/SYNTHETIC_METADATA_ONLY/private-workspace","originator":"synthetic-public-schema-fixture","cli_version":"0.161.0","source":"cli","history_mode":"legacy","base_instructions":{"text":"SYNTHETIC_METADATA_ONLY instruction not to upload"}}}
+{"timestamp":"2026-10-09T00:00:00Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"SYNTHETIC_METADATA_ONLY machine environment"}]}}
+{"timestamp":"2026-10-09T00:00:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic-turn-161"}}
+{"timestamp":"2026-10-09T00:00:00Z","type":"turn_context","payload":{"turn_id":"synthetic-turn-161","cwd":"/Users/SYNTHETIC_METADATA_ONLY","environment":{"TEMP":"/Users/SYNTHETIC_METADATA_ONLY/tmp"}}}
+{"timestamp":"2026-10-09T00:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember the synthetic maple-harbor decision."}]}}
+{"timestamp":"2026-10-09T00:00:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The synthetic maple-harbor example uses reviewed Markdown."}]}}
+{"timestamp":"2026-10-09T00:00:00Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"synthetic-turn-161","last_agent_message":"The synthetic maple-harbor example uses reviewed Markdown."}}

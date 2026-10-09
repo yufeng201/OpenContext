@@ -37,7 +37,9 @@
     "drill:deploy": "node scripts/deployment-drill.ts",
     "release:build": "pnpm build && node scripts/package-release.ts",
     "release:archive": "node scripts/release-archive.ts",
-    "demo:session-jsonl": "vitest run tests/integration/session-jsonl.test.ts -t DEMO"
+    "demo:session-jsonl": "vitest run tests/integration/session-jsonl.test.ts -t DEMO",
+    "session-memory:upload": "node scripts/session-memory-upload.ts",
+    "demo:session-upload": "vitest run tests/integration/session-upload.test.ts -t DEMO"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",

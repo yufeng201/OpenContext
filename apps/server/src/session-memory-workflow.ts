@@ -25,7 +25,13 @@ import type {
 import type { AuditContext } from '../../../packages/contracts/src/audit.ts';
 import { safeErrorCode } from '../../../packages/contracts/src/errors.ts';
 import { sessionDirectoryDefinition } from '../../../plugins/session-connector/src/directory.ts';
-import { sessionJsonlDirectoryDefinition } from '../../../plugins/session-connector/src/jsonl-directory.ts';
+import { jsonlUploadDefinition } from '../../../plugins/session-connector/src/jsonl-upload.ts';
+import { jsonlHash } from '../../../plugins/session-connector/src/codex-jsonl.ts';
+import type { SessionUpload } from '../../../packages/contracts/src/session-memory.ts';
+import {
+  sessionJsonlDirectoryDefinition,
+  sessionJsonl0161DirectoryDefinition,
+} from '../../../plugins/session-connector/src/jsonl-directory.ts';
 import {
   AgentTaskSchema,
   AgentResponseSchema,
@@ -41,19 +47,37 @@ export const SessionMemoryConfigSchema = Type.Object(
   {
     enabled: Type.Boolean({ default: false }),
     format: Type.Optional(
-      Type.Union([Type.Literal('v1'), Type.Literal('codex-jsonl-0.159.2')]),
+      Type.Union([
+        Type.Literal('v1'),
+        Type.Literal('codex-jsonl-0.159.2'),
+        Type.Literal('codex-jsonl-0.161.0'),
+      ]),
     ),
     dataRoot: Type.String({ minLength: 1, maxLength: 4096 }),
-    directory: Type.String({ minLength: 1, maxLength: 4096 }),
+    directory: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+    inputMode: Type.Optional(
+      Type.Union([Type.Literal('directory'), Type.Literal('upload')]),
+    ),
     projectScope: Type.String({ minLength: 1, maxLength: 120 }),
   },
   { additionalProperties: false },
 );
 export type SessionMemoryConfig = Static<typeof SessionMemoryConfigSchema>;
+export const memoryVersion = (config: SessionMemoryConfig) =>
+  config.format === 'codex-jsonl-0.161.0' ? '0.161.0' : '0.159.2';
 export const memoryConnector = (config: SessionMemoryConfig) =>
-  config.format === 'codex-jsonl-0.159.2'
-    ? sessionJsonlDirectoryDefinition
-    : sessionDirectoryDefinition;
+  config.inputMode === 'upload'
+    ? jsonlUploadDefinition(memoryVersion(config))
+    : config.format === 'codex-jsonl-0.161.0'
+      ? sessionJsonl0161DirectoryDefinition
+      : config.format === 'codex-jsonl-0.159.2'
+        ? sessionJsonlDirectoryDefinition
+        : sessionDirectoryDefinition;
+export const memoryBindingConfig = (config: SessionMemoryConfig) => ({
+  enabled: true,
+  ...(config.inputMode === 'upload' ? {} : { directory: config.directory }),
+  projectScope: config.projectScope,
+});
 const nullable = <T extends ReturnType<typeof Type.String>>(schema: T) =>
   Type.Union([schema, Type.Null()]);
 export const MemoryStateSchema = Type.Object(
@@ -98,9 +122,17 @@ export type MemoryHost = {
   audit?: AuditContext;
 };
 export type MemoryArgument =
-  string | { response?: unknown; taskId?: string; reviewHash?: string };
+  | string
+  | {
+      response?: unknown;
+      taskId?: string;
+      reviewHash?: string;
+      upload?: SessionUpload;
+      expectedUploadHash?: string | null;
+      expectedUploadId?: string | null;
+    };
 export type MemoryCommand =
-  'sync' | 'status' | 'submit' | 'approve' | 'retry' | 'cancel';
+  'sync' | 'status' | 'submit' | 'approve' | 'retry' | 'cancel' | 'upload';
 
 function privateDirectory(path: string): void {
   mkdirSync(path, { recursive: true, mode: 0o700 });
@@ -152,7 +184,15 @@ export async function sessionMemory(
   if (!config.enabled) return { status: 'disabled' };
   signal.throwIfAborted();
   const { dataRoot, directory } = config;
-  if (
+  if (config.inputMode === 'upload') {
+    if (
+      directory !== undefined ||
+      !config.format?.startsWith('codex-jsonl-') ||
+      !isAbsolute(dataRoot)
+    )
+      throw new Error('INVALID_CONFIG');
+  } else if (
+    !directory ||
     ![dataRoot, directory].every(isAbsolute) ||
     resolve(dataRoot) === resolve(directory) ||
     resolve(dataRoot).startsWith(resolve(directory) + sep) ||
@@ -203,7 +243,8 @@ export async function sessionMemory(
         if (state.configHash !== agentHash(config))
           throw new Error('INVALID_CONFIG');
       } else {
-        if (command !== 'sync') throw new Error('CHECKPOINT_MISSING');
+        if (!['sync', 'upload'].includes(command))
+          throw new Error('CHECKPOINT_MISSING');
         // Reconcile a crash between binding creation and checkpoint persistence.
         const matches = catalog
           .listProjects()
@@ -218,11 +259,7 @@ export async function sessionMemory(
         if (
           binding &&
           JSON.stringify(binding.config) !==
-            JSON.stringify({
-              enabled: true,
-              directory,
-              projectScope: config.projectScope,
-            })
+            JSON.stringify(memoryBindingConfig(config))
         )
           throw new Error('CHECKPOINT_CORRUPT');
         if (!binding) {
@@ -237,11 +274,7 @@ export async function sessionMemory(
               connector: await registry.prepare(
                 {
                   packageRef: `${memoryConnector(config).manifest.id}@0.1.0`,
-                  config: {
-                    enabled: true,
-                    directory,
-                    projectScope: config.projectScope,
-                  },
+                  config: memoryBindingConfig(config),
                 },
                 'connector',
                 {},
@@ -333,11 +366,45 @@ export async function sessionMemory(
       if (
         argument &&
         typeof argument === 'object' &&
+        command !== 'upload' &&
         argument.taskId !== state.task?.taskId
       )
         throw new Error('INPUT_CHANGED');
       try {
-        if (command === 'sync') {
+        if (command === 'sync' || command === 'upload') {
+          if (command === 'upload') {
+            if (
+              config.inputMode !== 'upload' ||
+              typeof argument !== 'object' ||
+              !argument.upload
+            )
+              throw new Error('POLICY_DENIED');
+            const content = JSON.stringify(argument.upload);
+            const binding = catalog.getBinding(state.bindingId)!;
+            await registry.validateImport(binding.connector!, content, {
+              signal,
+            });
+            const old = catalog.listImports(state.bindingId)[0];
+            if (old?.contentHash !== jsonlHash(content)) {
+              if (
+                (old?.contentHash ?? null) !== argument.expectedUploadHash ||
+                (old?.id ?? null) !== argument.expectedUploadId
+              )
+                throw new Error('IMPORT_CONFLICT');
+              signal.throwIfAborted();
+              const object = store.putText(content);
+              catalog.putImport(
+                state.bindingId,
+                {
+                  id: randomUUID(),
+                  filename: 'selected-session-upload.json',
+                  ...object,
+                },
+                old?.id ?? null,
+                host?.audit,
+              );
+            }
+          }
           await sync();
           const version = catalog.getBinding(state.bindingId)!.sourceVersion;
           if (state.taskVersion !== version || !state.task) await prepare();

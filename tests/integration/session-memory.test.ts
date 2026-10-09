@@ -70,7 +70,7 @@ function fixture() {
   const directory = resolve(root, 'exports');
   mkdirSync(directory);
   writeFileSync(resolve(directory, 'selected.json'), original);
-  const config: SessionMemoryConfig = {
+  const config: SessionMemoryConfig & { directory: string } = {
     enabled: true,
     dataRoot: resolve(root, 'data'),
     directory,

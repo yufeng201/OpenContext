@@ -3,7 +3,10 @@ import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { screenSession } from './index.ts';
 
-export const CODEX_JSONL_PARSER = 'codex-rollout/0.159.2-legacy-text-v1';
+export type CodexVersion = '0.159.2' | '0.161.0';
+export const codexParserId = (version: CodexVersion) =>
+  `codex-rollout/${version}-legacy-text-v1`;
+export const CODEX_JSONL_PARSER = codexParserId('0.159.2');
 const id = Type.String({ minLength: 1, maxLength: 200 });
 const RecordSchema = Type.Object(
   {
@@ -32,7 +35,7 @@ const MetadataSchema = Type.Object(
     timestamp: Type.String(),
     cwd: Type.String(),
     originator: Type.String(),
-    cli_version: Type.Literal('0.159.2'),
+    cli_version: Type.Union([Type.Literal('0.159.2'), Type.Literal('0.161.0')]),
     source: Type.Optional(
       Type.Union([
         Type.Literal('cli'),
@@ -92,7 +95,11 @@ type Turn = {
 };
 
 /** Bounded full replay: only a finished-turn prefix is a publishable checkpoint. */
-export function parseCodexJsonl(bytes: Uint8Array, projectScope: string) {
+export function parseCodexJsonl(
+  bytes: Uint8Array,
+  projectScope: string,
+  version: CodexVersion = '0.159.2',
+) {
   if (bytes.byteLength > 1_048_576) throw new Error('BYTE_LIMIT');
   const buffer = Buffer.from(bytes);
   const last = buffer.lastIndexOf(10);
@@ -162,6 +169,7 @@ export function parseCodexJsonl(bytes: Uint8Array, projectScope: string) {
           record.payload['multi_agent_version'] !== 'disabled')
       )
         reject();
+      if (p.cli_version !== version) reject();
       sessionId = p.id;
       continue;
     }
@@ -241,7 +249,7 @@ export function parseCodexJsonl(bytes: Uint8Array, projectScope: string) {
     canonical,
     receipt: {
       schema: 'opencontext.session-transform/v1' as const,
-      parser: CODEX_JSONL_PARSER,
+      parser: codexParserId(version),
       originalHash: jsonlHash(raw),
       originalBytes: Buffer.byteLength(raw),
       canonicalHash: jsonlHash(canonical),

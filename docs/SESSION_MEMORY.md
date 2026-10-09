@@ -1,6 +1,6 @@
 # 本地 session 自动记忆：受控文件交接
 
-状态：已实现在线控制 API/CLI 与兼容离线操作链路，测试使用合成会话和模拟 worker。默认关闭；没有真实 Codex 模型提炼验收，没有读取本机原生 rollout JSONL，也没有自动安装规则、Hook、常驻采集服务或登录凭据。
+状态：已实现在线控制 API/CLI 与兼容离线操作链路，测试使用合成会话和模拟 worker。默认关闭；没有真实 Codex 模型提炼验收，没有读取真实用户的原生 rollout JSONL，也没有自动安装规则、Hook、常驻采集服务或登录凭据。
 
 ## 在线操作：服务器保持运行
 
@@ -39,11 +39,11 @@ pnpm session-memory:online review
 
 ## 原生 Codex JSONL：显式服务器目录
 
-在新的专用配置中设置 `format: "codex-jsonl-0.159.2"`，其余配置字段相同。目录只放明确选定的顶层 `.jsonl` 文件。默认仍关闭；省略 format 沿用 v1 `.json` 导出。配置与已有 checkpoint 不一致会拒绝，不能直接把既有 v1 binding 改成 JSONL。
+在新的专用配置中设置 `format: "codex-jsonl-0.159.2"` 或 `format: "codex-jsonl-0.161.0"`（必须匹配文件 metadata 中的版本），其余配置字段相同。目录只放明确选定的顶层 `.jsonl` 文件。默认仍关闭；省略 format 沿用 v1 `.json` 导出。配置与已有 checkpoint 不一致会拒绝，不能直接把既有 v1 binding 改成 JSONL。
 
-`directory` 是 **OpenContext 服务器的本地绝对路径**。Mac CLI 只发送控制请求，不能让云端读取 Mac 的 `/Users/...`。本轮没有实现源码/会话上传或自动采集：异地主机须由操作员另行批准并把选定文件复制到服务器专用目录，再同步；同机部署才可直接选本机目录。不要把配置和 worker 响应放入来源目录。原生记录中的 `cwd` 只保留为数据，绝不据此打开路径。
+`directory` 是 **OpenContext 服务器的本地绝对路径**。Mac CLI 只发送控制请求，不能让云端读取 Mac 的 `/Users/...`。目录模式只适合同机部署或操作员已把文件放到服务器的情形。异地主机可使用下一节的显式客户端上传模式，无需让服务器读取 Mac 路径；没有自动采集。不要把配置和 worker 响应放入来源目录。原生记录中的 `cwd` 只保留为数据，绝不据此打开路径。
 
-首版针对公开固定版本 Codex 0.159.2 的 legacy 顶层文本 rollout；仅发布已完成 turn 的原始前缀，不声明整个会话已经结束。原始 JSONL 前缀、转换 v1 和转换凭据分别保存，包含 SHA256、已消费字节数和解析器身份；候选依赖这些固定 revision。未知版本/事件、工具 response、compaction、paginated/fork/subagent 历史均失败关闭。末尾无换行的记录（含不完整 UTF-8）等待，下次同步重读；中部坏行导致整轮拒绝。完整边界、重复、截断及信任边界详见适配说明。
+两个 profile 分别针对公开固定版本 Codex 0.159.2/0.161.0 的 legacy 顶层文本 rollout；仅发布已完成 turn 的原始前缀，不声明整个会话已经结束。原始 JSONL 前缀、转换 v1 和转换凭据分别保存，包含 SHA256、已消费字节数和解析器身份；候选依赖这些固定 revision。未知版本/事件、工具 response、compaction、paginated/fork/subagent 历史均失败关闭。末尾无换行的记录（含不完整 UTF-8）等待，下次同步重读；中部坏行导致整轮拒绝。完整边界、重复、截断及信任边界详见适配说明。
 
 可直接运行有界合成演示：
 
@@ -52,6 +52,53 @@ pnpm demo:session-jsonl
 ```
 
 演示测试会创建临时数据目录、固定的合成测试 token 和 loopback 服务，初次/追加同步后导出 task 文件，模拟 worker 返回 Markdown，再由测试操作员明确提交批准请求，验证 CLI 搜索和 MCP 固定 revision 读取，最终清理。它自动执行的是测试中的批准步骤，日常流程仍要求用户阅读 review 后手工 approve；没有启动 Codex Agent 或调用模型。
+
+## Mac/本地 CLI 上传：一次性选择，不运行后台采集
+
+服务器操作员使用已有私有实例的 owner 凭据，准备一个新的专用 session-memory 配置；初始关闭，审核配置后才改为 true：
+
+```json
+{
+  "enabled": false,
+  "inputMode": "upload",
+  "format": "codex-jsonl-0.161.0",
+  "dataRoot": "/tmp/opencontext-upload-example/server-data",
+  "projectScope": "synthetic-upload-project"
+}
+```
+
+`dataRoot` 是服务器本机路径，必须与 `OPENCONTEXT_DATA_ROOT` 相同。上传模式**不填写 directory**；不能把 Mac 路径配置到服务器。服务器通过 `OPENCONTEXT_SESSION_MEMORY_CONFIG` 加载此文件，功能只在 private 模式下可启用。省略配置或 enabled=false 时仍拒绝上传。已有目录模式 checkpoint 不能直接改成上传模式，已有执行锁也不会被自动重写；在新专用配置/数据根验证，迁移旧实例需另行受控操作。本轮不创建用户凭据或修改网络/Agent 配置。
+
+客户端需要此版本项目及冻结依赖、Node 24.19.0/pnpm 11.19.0；使用已有 `OPENCONTEXT_URL` 和 `OPENCONTEXT_OWNER_TOKEN`。远端地址必须是既有 HTTPS 入口，HTTP 仅允许 loopback；拒绝 URL 凭据和重定向。下面 PATH 是运行 CLI 的机器本地路径（Mac 上可以是 /Users/...），只用于本地读取，不发送该路径：
+
+```sh
+pnpm session-memory:upload --file /tmp/opencontext-client-example/selected.jsonl
+# 或：整个选定集合，最多八个顶层 JSONL 文件
+pnpm session-memory:upload --directory /tmp/opencontext-client-example/selected
+pnpm session-memory:online status
+pnpm session-memory:online task > /tmp/opencontext-client-example/task.json
+# 用户自己的 worker 读取 task 并写 response；这里没有自动启动 Agent
+pnpm session-memory:online submit /tmp/opencontext-client-example/response.json
+pnpm session-memory:online review
+```
+
+阅读预览后，使用其中的当前 TASK_ID/REVIEW_SHA256 执行 `pnpm session-memory:online approve TASK_ID REVIEW_SHA256`。在上传后修改 JSONL，再运行同一 upload 命令即可追加同步；没有 daemon、Hook、默认目录发现或定时器。`--directory` 把当前选择作为完整集合；没有选中的旧 session/消息会按已有 full 快照规则 tombstone，不能把一次 `--file` 当成追加第二个独立文件的集合合并。空集合拒绝。需要保留多份会话时，每次明确选择包含全部目标文件的目录。
+
+客户端插件先校验完整文件，等待末尾半行，仅提取已完成 turn 的 user/assistant 文本和稳定身份。上传的是 **text-projection/v1 投影**，不是原始字节：不发本地文件名、绝对路径、cwd、环境、系统/developer 指令、工具或无关 metadata；服务器校验投影必须可精确重建，不能靠附加字段夹带元数据。用户/assistant 正文本身若包含路径或秘密，不会猜测删改；操作员仍应先审核明确选中的内容。已知秘密字段检查不是完整秘密检测。
+
+每个本地文件最多 1 MiB、集合最多 8 文件；上传 envelope 的 UTF-8 JSON 最多 1 MiB，HTTP body 最多 2,105,344 字节，服务器解析后来源仍受 500 文件/10 MiB 约束。请求只带 cliVersion、文本投影、原始消费前缀 hash/bytes 和 CAS 字段，不读取/上传本地环境变量（仅已有连接地址和 token 用于请求）。每次全量有界重放；相同前缀在追加半行或重启后保持幂等，无重复候选。截断/替换按已验证完整集合重置，坏行和未知语义在发送或写入前拒绝。
+
+`POST /api/session-memory/upload` 是现有私有控制面下的 owner-only 路由，reader/匿名拒绝；不新增公开监听或放宽 Host/Origin/cookie 门禁。服务复用现有 Catalog、FileStore、Coordinator，整个集合以一个不可变 import 对象进行 CAS 替换，随后正常同步并创建审核任务。通用 imports POST/DELETE 不可修改这类专用 binding。`status` 返回 `uploadHash` 和 `uploadId`；二者共同约束更新，避免 A→B→A 后迟到请求覆盖新选择。已经是相同当前上传内容时只幂等同步，不复活已取消任务。
+
+客户端固定一次读取所得的请求体及 expectedUploadHash/expectedUploadId，单请求限时 15 秒；仅网络错误/超时最多重试一次，不对 409 冲突或其他 HTTP 错误重试。冲突后先检查 status 和当前选择，再决定是否明确重新上传。SIGINT/SIGTERM 停止客户端请求及后续重试；已经被服务器接受的上传可能继续完成，不承诺网络断开能回滚导入。查询 status；`cancel TASK_ID` 作废待审核任务而保留来源，需恢复时显式 `retry TASK_ID`。从未批准的上传不会自动产生可召回 Markdown。
+
+服务器原始来源是收到的投影，保存其精确 hash；转换凭据另保留客户端原始消费前缀 hash/bytes，并在候选中明确标为**未经服务器验证的客户端声明**。服务器没有收到已省略的原始元数据，因此不能独立证明该原始 hash，也不把投影冒充原文件。所有候选依赖固定的消息、投影、canonical 和转换凭据 revisions，仍需审核哈希与发布门禁。
+
+```sh
+pnpm demo:session-upload
+```
+
+这个有界演示使用同一 Linux 云端上的两个临时隔离目录模拟 client/server，使用实际 loopback HTTP、上传 CLI、模拟文件 worker、测试操作员批准及 CLI/MCP 固定版本召回，并清理本轮临时资源。不是 Mac↔云端多机器实测，不调用真实 Codex/模型。
 
 ## 范围与前置条件
 
