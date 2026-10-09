@@ -1,10 +1,45 @@
 # 本地 session 自动记忆：受控文件交接
 
-状态：已实现最小离线操作链路，测试使用合成会话和模拟 worker。默认关闭；没有真实 Codex 模型提炼验收，没有读取本机原生 rollout JSONL，也没有自动安装规则、Hook、常驻服务或登录凭据。
+状态：已实现在线控制 API/CLI 与兼容离线操作链路，测试使用合成会话和模拟 worker。默认关闭；没有真实 Codex 模型提炼验收，没有读取本机原生 rollout JSONL，也没有自动安装规则、Hook、常驻采集服务或登录凭据。
+
+## 在线操作：服务器保持运行
+
+推荐使用 `pnpm session-memory:online`。服务器复用唯一 Catalog、FileStore、Coordinator 和发布门禁；每次控制请求不会另开数据库写者。旧 `pnpm session-memory` 是停服离线兼容入口，不能与在线服务同时写同一目录。
+
+首次由操作员在本地准备下文的配置 JSON（默认 `enabled: false`），审核选定目录后启用。启动服务器时通过 `OPENCONTEXT_SESSION_MEMORY_CONFIG` 指向该配置文件，其 dataRoot 必须与 `OPENCONTEXT_DATA_ROOT` 相同。这是服务器本地配置，不接受 HTTP 修改路径。开启功能需私有模式；demo 拒绝启用。未提供配置时控制功能保持关闭。此增量不改变 owner 初始化：使用用户已有的私有配置，不创建或输出凭据。
+
+在线 CLI 使用现有 `OPENCONTEXT_OWNER_TOKEN` 和 `OPENCONTEXT_URL`（默认 `http://127.0.0.1:4310`）。不读取或写入本地运行数据目录，不修改 Agent 配置；HTTP 只允许 loopback，远端必须 HTTPS，拒绝 URL 中的凭据和重定向。
+
+```sh
+pnpm session-memory:online config
+pnpm session-memory:online sync
+pnpm session-memory:online status
+pnpm session-memory:online task
+pnpm session-memory:online submit /tmp/opencontext-memory-example/response.json
+pnpm session-memory:online review
+```
+
+`task` 输出 `{task, responseSchema}`，可重定向到明确选定的本地文件交给用户自己的 Agent；不是自动运行 Agent。模拟 worker/Agent 只按 task 生成 response JSON。`submit` 不发布，`review` 返回完整 Markdown 和审核哈希。阅读后执行 `approve TASK_ID REVIEW_SHA256`；取消执行 `cancel TASK_ID`，修正失败后执行 `retry TASK_ID`。TASK_ID 和哈希必须来自当前响应，旧任务不能取消或批准新任务。所有命令都放在 `pnpm session-memory:online` 后。
+
+| 路由                                   | 方法 / 输入             | 权限与行为                            |
+| -------------------------------------- | ----------------------- | ------------------------------------- |
+| `/api/session-memory`                  | GET                     | owner；配置、状态、active、任务及断点 |
+| `/api/session-memory/task`             | GET                     | owner；待处理任务与响应 schema        |
+| `/api/session-memory/review`           | GET                     | owner；当前审核 Markdown 与哈希       |
+| `/api/session-memory/sync`             | POST `{}`               | owner；选定目录同步并生成或复用任务   |
+| `/api/session-memory/submit`           | POST AgentResponse      | owner；最多 4 MiB，校验候选，不发布   |
+| `/api/session-memory/approve`          | POST taskId、reviewHash | owner；显式批准当前预览后发布         |
+| `/api/session-memory/cancel`、`/retry` | POST taskId             | owner；作废或重新同步并建立新任务     |
+
+匿名返回 401，reader 返回 403；既有 Host/Origin/cookie 门禁继续生效。任务和预览含会话内容，只允许 owner 访问。专用插件不能通过通用创建 binding API 选择；普通 process 没有审核授权时失败关闭。更改本地配置会拒绝旧任务访问，不会静默把旧来源套用到新目录。来源撤销后拒绝任务/审核及批准操作。
+
+相同并发请求合并执行；不同的同时操作返回 `RESOURCE_BUSY`。已发布任务的相同批准请求幂等，但仍检查配置、来源有效性与版本。新配置在重启后生效；日常同步、提交、审核和发布均不需要停服。在线控制请求脱离客户端连接后仍可能完成：CLI 15 秒超时不撤销服务器已接受的操作，应先查询 status/active，再决定重试。active 工作期间不另起控制操作，pending/review 的取消仅作废交接任务，不终止用户另行运行的 Agent。读接口继续服务，既有队列也可能使控制请求等待。
+
+在线合成回归见 `tests/integration/session-memory-online.test.ts`，覆盖持续运行的服务、权限拒绝、并发幂等、审核前不可召回、重启继续审核、撤销、配置变更以及真实 loopback CLI 完整操作。原生 JSONL 仍未实现，评估与拒绝边界见[适配评估](SESSION_JSONL_ASSESSMENT.md)。
 
 ## 范围与前置条件
 
-沿用[开发环境](DEVELOPMENT.md)的 Node/pnpm 与冻结依赖。`pnpm session-memory` 是持有数据目录权限的本地操作员入口，与 `pnpm admin` 一样，执行时必须先停止同目录的服务器及其他写者；已有 Catalog 单写者锁会拒绝并发占用。它不是 reader-token 接口，不接收或创建账号凭据，拒绝带 `OPENCONTEXT_QUERY_TOKEN` 的调用。普通 HTTP 服务不会注册目录扫描或审核处理器，也不能通过 API 指定任意本地目录或绕过审核。
+以下为兼容离线入口，沿用[开发环境](DEVELOPMENT.md)的 Node/pnpm 与冻结依赖。`pnpm session-memory` 是持有数据目录权限的本地操作员入口，与 `pnpm admin` 一样，执行时必须先停止同目录的服务器及其他写者；已有 Catalog 单写者锁会拒绝并发占用。它不是 reader-token 接口，不接收或创建账号凭据，拒绝带 `OPENCONTEXT_QUERY_TOKEN` 的调用。在线使用上文新 CLI，不应为每次同步重启服务器。
 
 选择一个专用、受信、由操作员控制的导出目录，和一个独立的空数据目录。两者不得互相包含。数据根和 plugin-state 必须为私有权限；不要把 HOME、源码根或真实会话目录用于下面的合成演练。文件读写校验链接、文件身份、大小及修改时间，但不是对抗同 OS 账号恶意并发替换的文件系统沙箱。
 

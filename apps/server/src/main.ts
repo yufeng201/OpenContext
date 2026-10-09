@@ -8,6 +8,7 @@ import { serve } from './runtime.ts';
 import { resolve } from 'node:path';
 import { createApplication } from './app.ts';
 import { feishuCredentials } from './feishu-credentials.ts';
+import { readLocalText } from '@opencontext/plugin-sdk';
 
 async function main(): Promise<void> {
   const demo = process.argv.includes('--demo');
@@ -43,6 +44,16 @@ async function main(): Promise<void> {
     dataMode: demo ? 'demo' : 'private',
     ownerToken,
     feishu: { resolveCredential: feishuCredentials(process.env) },
+    ...(process.env['OPENCONTEXT_SESSION_MEMORY_CONFIG']
+      ? {
+          sessionMemory: JSON.parse(
+            readLocalText(
+              process.env['OPENCONTEXT_SESSION_MEMORY_CONFIG'],
+              65_536,
+            ),
+          ) as unknown,
+        }
+      : {}),
     ...(localRoot ? { allowedLocalRepoRoot: resolve(localRoot) } : {}),
   });
   const address = await serve(application.app, config);
