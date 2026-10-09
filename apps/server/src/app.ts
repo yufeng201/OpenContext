@@ -824,6 +824,7 @@ export function createApplication(options: ApplicationOptions) {
             (ref) =>
               [
                 'org.opencontext.session-directory@0.1.0',
+                'org.opencontext.session-jsonl-directory@0.1.0',
                 'org.opencontext.reviewed-session-agent@0.1.0',
               ].includes(ref),
           )

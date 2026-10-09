@@ -35,7 +35,23 @@ pnpm session-memory:online review
 
 相同并发请求合并执行；不同的同时操作返回 `RESOURCE_BUSY`。已发布任务的相同批准请求幂等，但仍检查配置、来源有效性与版本。新配置在重启后生效；日常同步、提交、审核和发布均不需要停服。在线控制请求脱离客户端连接后仍可能完成：CLI 15 秒超时不撤销服务器已接受的操作，应先查询 status/active，再决定重试。active 工作期间不另起控制操作，pending/review 的取消仅作废交接任务，不终止用户另行运行的 Agent。读接口继续服务，既有队列也可能使控制请求等待。
 
-在线合成回归见 `tests/integration/session-memory-online.test.ts`，覆盖持续运行的服务、权限拒绝、并发幂等、审核前不可召回、重启继续审核、撤销、配置变更以及真实 loopback CLI 完整操作。原生 JSONL 仍未实现，评估与拒绝边界见[适配评估](SESSION_JSONL_ASSESSMENT.md)。
+在线合成回归见 `tests/integration/session-memory-online.test.ts`，覆盖持续运行的服务、权限拒绝、并发幂等、审核前不可召回、重启继续审核、撤销、配置变更以及真实 loopback CLI 完整操作。原生 JSONL 已有显式启用的有限适配，支持范围与拒绝边界见[适配说明](SESSION_JSONL_ASSESSMENT.md)。
+
+## 原生 Codex JSONL：显式服务器目录
+
+在新的专用配置中设置 `format: "codex-jsonl-0.159.2"`，其余配置字段相同。目录只放明确选定的顶层 `.jsonl` 文件。默认仍关闭；省略 format 沿用 v1 `.json` 导出。配置与已有 checkpoint 不一致会拒绝，不能直接把既有 v1 binding 改成 JSONL。
+
+`directory` 是 **OpenContext 服务器的本地绝对路径**。Mac CLI 只发送控制请求，不能让云端读取 Mac 的 `/Users/...`。本轮没有实现源码/会话上传或自动采集：异地主机须由操作员另行批准并把选定文件复制到服务器专用目录，再同步；同机部署才可直接选本机目录。不要把配置和 worker 响应放入来源目录。原生记录中的 `cwd` 只保留为数据，绝不据此打开路径。
+
+首版针对公开固定版本 Codex 0.159.2 的 legacy 顶层文本 rollout；仅发布已完成 turn 的原始前缀，不声明整个会话已经结束。原始 JSONL 前缀、转换 v1 和转换凭据分别保存，包含 SHA256、已消费字节数和解析器身份；候选依赖这些固定 revision。未知版本/事件、工具 response、compaction、paginated/fork/subagent 历史均失败关闭。末尾无换行的记录（含不完整 UTF-8）等待，下次同步重读；中部坏行导致整轮拒绝。完整边界、重复、截断及信任边界详见适配说明。
+
+可直接运行有界合成演示：
+
+```sh
+pnpm demo:session-jsonl
+```
+
+演示测试会创建临时数据目录、固定的合成测试 token 和 loopback 服务，初次/追加同步后导出 task 文件，模拟 worker 返回 Markdown，再由测试操作员明确提交批准请求，验证 CLI 搜索和 MCP 固定 revision 读取，最终清理。它自动执行的是测试中的批准步骤，日常流程仍要求用户阅读 review 后手工 approve；没有启动 Codex Agent 或调用模型。
 
 ## 范围与前置条件
 
@@ -43,7 +59,7 @@ pnpm session-memory:online review
 
 选择一个专用、受信、由操作员控制的导出目录，和一个独立的空数据目录。两者不得互相包含。数据根和 plugin-state 必须为私有权限；不要把 HOME、源码根或真实会话目录用于下面的合成演练。文件读写校验链接、文件身份、大小及修改时间，但不是对抗同 OS 账号恶意并发替换的文件系统沙箱。
 
-当前输入仅支持已批准的 `opencontext.session-import/v1` 完整 Codex 导出，参见仓库 `plugins/session-connector/fixtures/codex-session.json`。每次最多 32 个顶层 `.json` 普通文件、每文件 1 MiB、原始总量 10 MiB；源快照含规范化消息后仍受 500 文件/10 MiB 上限约束。不递归扫描、不猜默认 session 路径、不跟随链接、不接受空目录、部分 JSON、未完成 turn 或未知格式。生产者应先在目录外完成导出，再原子移入；不要把响应文件或配置放进导出目录。
+默认 `format` 为 `v1`，支持已批准的 `opencontext.session-import/v1` 完整 Codex 导出，参见仓库 `plugins/session-connector/fixtures/codex-session.json`。每次最多 32 个顶层 `.json` 普通文件、每文件 1 MiB、原始总量 10 MiB；源快照含规范化消息后仍受 500 文件/10 MiB 上限约束。不递归扫描、不猜默认 session 路径、不跟随链接、不接受空目录、部分 JSON、未完成 turn 或未知格式。生产者应先在目录外完成导出，再原子移入；不要把响应文件或配置放进导出目录。
 
 ## 配置与同步
 

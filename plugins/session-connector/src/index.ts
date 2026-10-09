@@ -107,7 +107,7 @@ function cancelled(context: ExecutionContext): void {
 }
 
 /** Reject known secret-bearing metadata; do not redact then claim byte preservation. */
-function screen(value: unknown, depth = 0): void {
+export function screenSession(value: unknown, depth = 0): void {
   if (depth > 64)
     fail('INVALID_SESSION', 'JSON nesting exceeds the supported limit');
   if (typeof value === 'string') {
@@ -119,7 +119,7 @@ function screen(value: unknown, depth = 0): void {
     return;
   }
   if (Array.isArray(value)) {
-    for (const item of value) screen(item, depth + 1);
+    for (const item of value) screenSession(item, depth + 1);
   } else if (value && typeof value === 'object') {
     for (const [key, item] of Object.entries(value)) {
       if (
@@ -131,7 +131,7 @@ function screen(value: unknown, depth = 0): void {
           'SECRET_DETECTED',
           'Secret-bearing metadata must be excluded before import',
         );
-      screen(item, depth + 1);
+      screenSession(item, depth + 1);
     }
   }
 }
@@ -151,7 +151,7 @@ function parse(
   } catch {
     fail('INVALID_SESSION', 'Import is not valid JSON');
   }
-  screen(parsed);
+  screenSession(parsed);
   const envelope = object(parsed);
   const expected = [
     'schema',

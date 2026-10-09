@@ -11,6 +11,12 @@ import { resolve } from 'node:path';
 
 /** Bounded local operator input, never a URL or an implicit home-directory scan. */
 export function readLocalText(path: string, maximum: number): string {
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
+    readLocalBytes(path, maximum),
+  );
+}
+
+export function readLocalBytes(path: string, maximum: number): Buffer {
   if (realpathSync(path) !== resolve(path)) throw new Error('UNSAFE_SYMLINK');
   const fd = openSync(
     path,
@@ -44,9 +50,7 @@ export function readLocalText(path: string, maximum: number): string {
       before.ctimeMs !== after.ctimeMs
     )
       throw new Error('INPUT_CHANGED');
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
-      bytes.subarray(0, count),
-    );
+    return bytes.subarray(0, count);
   } finally {
     closeSync(fd);
   }

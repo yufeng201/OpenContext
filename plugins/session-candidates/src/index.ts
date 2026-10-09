@@ -257,6 +257,40 @@ export async function extractCandidates(
         'INVALID_INPUT: A normalized message requires its fixed raw session source',
       );
     verifyRawProvenance(raw.text, message);
+    // The locked trusted connector attests the conversion; this processor verifies
+    // the hash-linked receipt, not an independent implementation of its parser.
+    const native = input.files.find(
+      (entry) =>
+        entry.file.logicalPath === rawPath.replace(/raw\.json$/, 'raw.jsonl'),
+    );
+    const receipt = input.files.find(
+      (entry) =>
+        entry.file.logicalPath ===
+        rawPath.replace(/raw\.json$/, 'transform.json'),
+    );
+    let nativeProvenance = '';
+    if (native || receipt) {
+      if (!native || !receipt) invalidProvenance();
+      const proof: unknown = JSON.parse(receipt.text);
+      const schema = Type.Object(
+        {
+          schema: Type.Literal('opencontext.session-transform/v1'),
+          parser: Type.Literal('codex-rollout/0.159.2-legacy-text-v1'),
+          originalHash: Type.String(),
+          originalBytes: Type.Integer({ minimum: 1 }),
+          canonicalHash: Type.String(),
+        },
+        { additionalProperties: false },
+      );
+      if (
+        !Value.Check(schema, proof) ||
+        proof.originalHash !== sha256(native.text) ||
+        proof.originalBytes !== Buffer.byteLength(native.text) ||
+        proof.canonicalHash !== sha256(raw.text)
+      )
+        invalidProvenance();
+      nativeProvenance = `Native JSONL completed prefix: [fixed original](oc://space/${uriPart(input.projectId)}/file/${uriPart(native.file.fileId)}@${uriPart(native.file.revisionId)})\n\nOriginal SHA-256: ${proof.originalHash}\n\nParser: ${proof.parser}\n\nTransformation receipt: [fixed receipt](oc://space/${uriPart(input.projectId)}/file/${uriPart(receipt.file.fileId)}@${uriPart(receipt.file.revisionId)})\n\n`;
+    }
     const candidates = await extractor.extract(message, {
       signal: context.signal,
     });
@@ -307,6 +341,12 @@ export async function extractCandidates(
         derivedFrom: [
           { fileId: file.fileId, revisionId: file.revisionId },
           { fileId: raw!.file.fileId, revisionId: raw!.file.revisionId },
+          ...(native && receipt
+            ? [native, receipt].map((entry) => ({
+                fileId: entry.file.fileId,
+                revisionId: entry.file.revisionId,
+              }))
+            : []),
         ],
         content:
           `# ${candidate.kind} candidate\n\n## Status\n\nstatus: candidate\n\nmethod: ${extractor.method}\n\nconfidence: ${extractor.method === 'deterministic' ? 'exact explicit-marker match only' : 'unreviewed adapter proposal'}; semantic correctness is unverified\n\n` +
@@ -314,7 +354,8 @@ export async function extractCandidates(
           `## Provenance\n\nProvider: ${message.provider}\n\nSession ID: ${literal(message.sessionId)}\n\nMessage ID: ${literal(message.messageId)}\n\n` +
           (message.turnId ? `Turn ID: ${literal(message.turnId)}\n\n` : '') +
           `Evidence line: ${candidate.line}\n\nSource: [fixed source revision](${citation})\n\nSHA-256: ${file.contentHash}\n\n` +
-          `Original session: [fixed raw export](oc://space/${uriPart(input.projectId)}/file/${uriPart(raw!.file.fileId)}@${uriPart(raw!.file.revisionId)})\n\nRaw SHA-256: ${raw!.file.contentHash}\n\n` +
+          `${native ? 'Canonical converted session' : 'Original session'}: [fixed raw export](oc://space/${uriPart(input.projectId)}/file/${uriPart(raw!.file.fileId)}@${uriPart(raw!.file.revisionId)})\n\nRaw SHA-256: ${raw!.file.contentHash}\n\n` +
+          nativeProvenance +
           `## Content\n\n${fence}text\n${candidate.text}\n${fence}\n`,
       });
     }

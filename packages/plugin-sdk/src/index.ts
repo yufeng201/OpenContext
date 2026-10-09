@@ -12,7 +12,7 @@ import type {
   ConnectionTestResult,
 } from '@opencontext/contracts';
 import type { TSchema } from '@sinclair/typebox';
-export { readLocalText } from './local-files.ts';
+export { readLocalText, readLocalBytes } from './local-files.ts';
 
 export type ExecutionContext = {
   signal: AbortSignal;

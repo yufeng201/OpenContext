@@ -6,7 +6,6 @@ import {
   type PluginDefinition,
   type ConnectorDefinition,
 } from '@opencontext/plugin-sdk';
-import { sessionDirectoryDefinition } from '../../../plugins/session-connector/src/directory.ts';
 import {
   createReviewedAgentDefinition,
   AgentResponseSchema,
@@ -14,6 +13,7 @@ import {
 } from '../../../plugins/session-candidates/src/local-agent.ts';
 import {
   sessionMemory,
+  memoryConnector,
   SessionMemoryConfigSchema,
   MemoryStateSchema,
   type SessionMemoryConfig,
@@ -51,11 +51,11 @@ export class SessionMemoryService {
       ? []
       : [
           {
-            ...sessionDirectoryDefinition,
+            ...memoryConnector(config),
             validateConfig: gate,
             invoke: (input, context) => {
               gate(input.config);
-              return sessionDirectoryDefinition.invoke(input, context);
+              return memoryConnector(config).invoke(input, context);
             },
           } satisfies ConnectorDefinition,
           createReviewedAgentDefinition(() => this.approval),
@@ -78,6 +78,7 @@ export class SessionMemoryService {
     const state = this.config.enabled ? this.state() : undefined;
     return {
       enabled: this.config.enabled,
+      format: this.config.format ?? 'v1',
       directory: this.config.directory,
       projectScope: this.config.projectScope,
       active: this.active !== undefined,

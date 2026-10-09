@@ -17,6 +17,9 @@ export const SessionMemoryStatusSchema = Type.Object(
         'published',
       ].map((s) => Type.Literal(s)),
     ),
+    format: Type.Optional(
+      Type.Union([Type.Literal('v1'), Type.Literal('codex-jsonl-0.159.2')]),
+    ),
     directory: Type.Optional(Type.String()),
     projectScope: Type.Optional(Type.String()),
     projectId: Type.Optional(nullable),

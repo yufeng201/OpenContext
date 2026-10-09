@@ -25,6 +25,7 @@ import type {
 import type { AuditContext } from '../../../packages/contracts/src/audit.ts';
 import { safeErrorCode } from '../../../packages/contracts/src/errors.ts';
 import { sessionDirectoryDefinition } from '../../../plugins/session-connector/src/directory.ts';
+import { sessionJsonlDirectoryDefinition } from '../../../plugins/session-connector/src/jsonl-directory.ts';
 import {
   AgentTaskSchema,
   AgentResponseSchema,
@@ -39,6 +40,9 @@ import {
 export const SessionMemoryConfigSchema = Type.Object(
   {
     enabled: Type.Boolean({ default: false }),
+    format: Type.Optional(
+      Type.Union([Type.Literal('v1'), Type.Literal('codex-jsonl-0.159.2')]),
+    ),
     dataRoot: Type.String({ minLength: 1, maxLength: 4096 }),
     directory: Type.String({ minLength: 1, maxLength: 4096 }),
     projectScope: Type.String({ minLength: 1, maxLength: 120 }),
@@ -46,6 +50,10 @@ export const SessionMemoryConfigSchema = Type.Object(
   { additionalProperties: false },
 );
 export type SessionMemoryConfig = Static<typeof SessionMemoryConfigSchema>;
+export const memoryConnector = (config: SessionMemoryConfig) =>
+  config.format === 'codex-jsonl-0.159.2'
+    ? sessionJsonlDirectoryDefinition
+    : sessionDirectoryDefinition;
 const nullable = <T extends ReturnType<typeof Type.String>>(schema: T) =>
   Type.Union([schema, Type.Null()]);
 export const MemoryStateSchema = Type.Object(
@@ -175,7 +183,7 @@ export async function sessionMemory(
     const registry =
       host?.registry ??
       new StaticRegistry([
-        sessionDirectoryDefinition,
+        memoryConnector(config),
         createReviewedAgentDefinition(() => approval),
       ]);
     coordinator =
@@ -203,7 +211,7 @@ export async function sessionMemory(
           .filter(
             (b) =>
               b.connector?.packageRef ===
-              'org.opencontext.session-directory@0.1.0',
+              `${memoryConnector(config).manifest.id}@0.1.0`,
           );
         if (matches.length > 1) throw new Error('CHECKPOINT_CORRUPT');
         let binding = matches[0];
@@ -228,7 +236,7 @@ export async function sessionMemory(
               name: 'Selected Codex exports',
               connector: await registry.prepare(
                 {
-                  packageRef: 'org.opencontext.session-directory@0.1.0',
+                  packageRef: `${memoryConnector(config).manifest.id}@0.1.0`,
                   config: {
                     enabled: true,
                     directory,
