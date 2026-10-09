@@ -25,6 +25,7 @@
     "start": "node apps/server/src/main.ts",
     "dev:web": "pnpm --filter @opencontext/web dev",
     "cli": "node scripts/opencontext.ts",
+    "session-memory": "node scripts/session-memory.ts",
     "docs:build": "node scripts/build-docs.ts",
     "docs:preview": "node scripts/preview-docs.ts",
     "admin": "node scripts/admin.ts",

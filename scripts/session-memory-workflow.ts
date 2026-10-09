@@ -1,0 +1,426 @@
+import { randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { isAbsolute, resolve, sep } from 'node:path';
+import { Type, type Static } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
+import { Catalog } from '../packages/state-sqlite/src/index.ts';
+import { FileStore } from '../packages/storage-fs/src/index.ts';
+import { StaticRegistry } from '../packages/plugin-host/src/index.ts';
+import { readLocalText } from '../packages/plugin-sdk/src/index.ts';
+import { Coordinator } from '../apps/server/src/coordinator.ts';
+import type {
+  ProcessorInput,
+  ProcessorOutput,
+} from '../packages/contracts/src/index.ts';
+import { safeErrorCode } from '../packages/contracts/src/errors.ts';
+import { sessionDirectoryDefinition } from '../plugins/session-connector/src/directory.ts';
+import {
+  AgentTaskSchema,
+  AgentResponseSchema,
+  agentHash,
+  createAgentTask,
+  createReviewedAgentDefinition,
+  reviewAgentResponse,
+  type AgentTask,
+  type AgentResponse,
+} from '../plugins/session-candidates/src/local-agent.ts';
+
+export const SessionMemoryConfigSchema = Type.Object(
+  {
+    enabled: Type.Boolean({ default: false }),
+    dataRoot: Type.String({ minLength: 1, maxLength: 4096 }),
+    directory: Type.String({ minLength: 1, maxLength: 4096 }),
+    projectScope: Type.String({ minLength: 1, maxLength: 120 }),
+  },
+  { additionalProperties: false },
+);
+export type SessionMemoryConfig = Static<typeof SessionMemoryConfigSchema>;
+const nullable = <T extends ReturnType<typeof Type.String>>(schema: T) =>
+  Type.Union([schema, Type.Null()]);
+const StateSchema = Type.Object(
+  {
+    schema: Type.Literal('opencontext.session-memory-state/v1'),
+    configHash: Type.String(),
+    projectId: Type.String(),
+    bindingId: Type.String(),
+    processedVersion: nullable(Type.String()),
+    taskVersion: nullable(Type.String()),
+    task: Type.Union([AgentTaskSchema, Type.Null()]),
+    response: Type.Union([AgentResponseSchema, Type.Null()]),
+    reviewHash: nullable(Type.String()),
+    runId: nullable(Type.String()),
+    error: nullable(Type.String()),
+    status: Type.Union(
+      [
+        'idle',
+        'pending',
+        'review',
+        'failed',
+        'cancelled',
+        'publishing',
+        'published',
+      ].map((s) => Type.Literal(s)),
+    ),
+  },
+  { additionalProperties: false },
+);
+type State = Static<typeof StateSchema>;
+export type MemoryCommand =
+  'sync' | 'status' | 'submit' | 'approve' | 'retry' | 'cancel';
+
+function privateDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (
+    realpathSync(path) !== resolve(path) ||
+    (statSync(path).mode & 0o077) !== 0
+  )
+    throw new Error('ROOT_PERMISSIONS_UNSAFE');
+}
+function atomicText(path: string, text: string): void {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(temporary, 'wx', 0o600);
+  try {
+    writeFileSync(fd, text);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
+  const directory = openSync(resolve(path, '..'), 'r');
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
+}
+function atomic(path: string, value: unknown): void {
+  atomicText(path, JSON.stringify(value, null, 2) + '\n');
+}
+function preview(output: ProcessorOutput): string {
+  return (
+    `# Local Agent publication review\n\nReview SHA-256: ${agentHash(output)}\n\n${output.outputs.length} candidates. Approval replaces the prior generated set for this binding; an empty set removes prior generated candidates. This does not install or approve system rules.\n\n` +
+    output.outputs
+      .map((item) => `---\n\nFile: ${item.relativePath}\n\n${item.content}`)
+      .join('\n')
+  );
+}
+
+/** Offline filesystem-operator authority, like admin.ts. Never accepts reader credentials. */
+export async function sessionMemory(
+  config: unknown,
+  command: MemoryCommand,
+  argument?: string,
+  signal = new AbortController().signal,
+) {
+  if (!Value.Check(SessionMemoryConfigSchema, config))
+    throw new Error('INVALID_CONFIG');
+  if (!config.enabled) return { status: 'disabled' };
+  signal.throwIfAborted();
+  const { dataRoot, directory } = config;
+  if (
+    ![dataRoot, directory].every(isAbsolute) ||
+    resolve(dataRoot) === resolve(directory) ||
+    resolve(dataRoot).startsWith(resolve(directory) + sep) ||
+    resolve(directory).startsWith(resolve(dataRoot) + sep)
+  )
+    throw new Error('INVALID_PATH');
+  // Do not silently initialize a mixed directory or follow links into another data root.
+  if (existsSync(dataRoot) && realpathSync(dataRoot) !== resolve(dataRoot))
+    throw new Error('UNSAFE_SYMLINK');
+  privateDirectory(dataRoot);
+  const catalog = new Catalog(resolve(dataRoot, 'control.sqlite'), {
+    mode: 'private',
+  });
+  let coordinator: Coordinator | undefined;
+  try {
+    const stateRoot = resolve(dataRoot, 'plugin-state', 'session-memory');
+    privateDirectory(resolve(dataRoot, 'plugin-state'));
+    privateDirectory(stateRoot);
+    const statePath = resolve(stateRoot, 'state.json');
+    const taskPath = resolve(stateRoot, 'task.json');
+    const previewPath = resolve(stateRoot, 'review.md');
+    const store = new FileStore(dataRoot);
+    let approval:
+      | { task: AgentTask; response: AgentResponse; reviewHash: string }
+      | undefined;
+    const registry = new StaticRegistry([
+      sessionDirectoryDefinition,
+      createReviewedAgentDefinition(() => approval),
+    ]);
+    coordinator = new Coordinator(catalog, store, dataRoot, registry);
+    const worker = coordinator;
+    const abort = () => {
+      void worker.stop();
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    try {
+      let state: State;
+      if (existsSync(statePath)) {
+        const value: unknown = JSON.parse(readLocalText(statePath, 16_777_216));
+        if (!Value.Check(StateSchema, value))
+          throw new Error('CHECKPOINT_CORRUPT');
+        state = value;
+        if (state.configHash !== agentHash(config))
+          throw new Error('INVALID_CONFIG');
+      } else {
+        if (command !== 'sync') throw new Error('CHECKPOINT_MISSING');
+        // Reconcile a crash between binding creation and checkpoint persistence.
+        const matches = catalog
+          .listProjects()
+          .flatMap((p) => catalog.listBindings(p.id))
+          .filter(
+            (b) =>
+              b.connector?.packageRef ===
+              'org.opencontext.session-directory@0.1.0',
+          );
+        if (matches.length > 1) throw new Error('CHECKPOINT_CORRUPT');
+        let binding = matches[0];
+        if (
+          binding &&
+          JSON.stringify(binding.config) !==
+            JSON.stringify({
+              enabled: true,
+              directory,
+              projectScope: config.projectScope,
+            })
+        )
+          throw new Error('CHECKPOINT_CORRUPT');
+        if (!binding) {
+          const project = catalog.createProject('Local session memory');
+          binding = catalog.createBinding(project.id, {
+            name: 'Selected Codex exports',
+            connector: await registry.prepare(
+              {
+                packageRef: 'org.opencontext.session-directory@0.1.0',
+                config: {
+                  enabled: true,
+                  directory,
+                  projectScope: config.projectScope,
+                },
+              },
+              'connector',
+              {},
+            ),
+            processor: await registry.prepare(
+              {
+                packageRef: 'org.opencontext.reviewed-session-agent@0.1.0',
+                config: {},
+              },
+              'processor',
+              {},
+            ),
+          });
+        }
+        state = {
+          schema: 'opencontext.session-memory-state/v1',
+          configHash: agentHash(config),
+          projectId: binding.projectId,
+          bindingId: binding.id,
+          processedVersion: null,
+          taskVersion: null,
+          task: null,
+          response: null,
+          reviewHash: null,
+          runId: null,
+          error: null,
+          status: 'idle',
+        };
+        atomic(statePath, state);
+      }
+      const binding = catalog.getBinding(state.bindingId);
+      if (!binding?.active || binding.projectId !== state.projectId)
+        throw new Error('BINDING_REVOKED');
+      const save = () => atomic(statePath, state);
+      const context = { signal, workDir: stateRoot };
+      const input = (): ProcessorInput => {
+        const head = catalog.head(state.projectId);
+        if (!head) throw new Error('NO_FORMAL_INPUT');
+        return {
+          projectId: state.projectId,
+          bindingId: state.bindingId,
+          inputCommitId: head,
+          files: catalog
+            .currentFiles(state.projectId)
+            .filter(
+              (f) =>
+                f.bindingId === state.bindingId &&
+                f.collection === 'sources' &&
+                !f.tombstone &&
+                f.freshness === 'fresh',
+            )
+            .map((file) => ({ file, text: store.readText(file.contentHash) })),
+        };
+      };
+      const prepare = async () => {
+        state.task = await createAgentTask(input(), context);
+        state.taskVersion = catalog.getBinding(state.bindingId)!.sourceVersion;
+        state.status = 'pending';
+        state.response = null;
+        state.reviewHash = null;
+        state.runId = null;
+        state.error = null;
+        save();
+        atomic(taskPath, state.task);
+        atomic(resolve(stateRoot, 'response-schema.json'), AgentResponseSchema);
+      };
+      const sync = async () => {
+        const run = catalog.enqueue(state.bindingId, 'sync');
+        await worker.drain();
+        signal.throwIfAborted();
+        const done = catalog.getRun(run.id)!;
+        if (done.state !== 'published')
+          throw new Error(done.error ?? 'PROCESSING_FAILED');
+      };
+      // A published host run is authoritative if the process died before saving its cursor.
+      if (state.status === 'publishing') {
+        const run = state.runId ? catalog.getRun(state.runId) : null;
+        if (run?.state === 'published') {
+          state.status = 'published';
+          state.processedVersion = state.taskVersion;
+        } else {
+          state.status = 'failed';
+          state.error = 'PROCESSING_FAILED';
+        }
+        save();
+      }
+      try {
+        if (command === 'sync') {
+          await sync();
+          const version = catalog.getBinding(state.bindingId)!.sourceVersion;
+          if (state.taskVersion !== version || !state.task) await prepare();
+          else if (state.status === 'pending') {
+            atomic(taskPath, state.task);
+            atomic(
+              resolve(stateRoot, 'response-schema.json'),
+              AgentResponseSchema,
+            );
+          }
+        } else if (command === 'retry') {
+          if (!['failed', 'cancelled'].includes(state.status))
+            throw new Error('POLICY_DENIED');
+          await sync();
+          await prepare();
+        } else if (command === 'cancel') {
+          if (state.status === 'published') throw new Error('POLICY_DENIED');
+          state.status = 'cancelled';
+          state.response = null;
+          state.reviewHash = null;
+          state.error = 'CANCELLED';
+          save();
+        } else if (command === 'submit') {
+          if (
+            !argument ||
+            !state.task ||
+            !['pending', 'review'].includes(state.status)
+          )
+            throw new Error('POLICY_DENIED');
+          const response: unknown = JSON.parse(
+            readLocalText(argument, 4_194_304),
+          );
+          const output = await reviewAgentResponse(
+            state.task,
+            input(),
+            response,
+            context,
+          );
+          state.response = response as AgentResponse;
+          state.reviewHash = agentHash(output);
+          state.status = 'review';
+          state.error = null;
+          atomicText(previewPath, preview(output));
+          save();
+        } else if (command === 'approve') {
+          if (
+            !argument ||
+            state.status !== 'review' ||
+            !state.task ||
+            !state.response ||
+            argument !== state.reviewHash
+          )
+            throw new Error('POLICY_DENIED');
+          const output = await reviewAgentResponse(
+            state.task,
+            input(),
+            state.response,
+            context,
+          );
+          if (
+            agentHash(output) !== argument ||
+            readLocalText(previewPath, 8_388_608) !== preview(output)
+          )
+            throw new Error('INPUT_CHANGED');
+          approval = {
+            task: state.task,
+            response: state.response,
+            reviewHash: argument,
+          };
+          state.status = 'publishing';
+          save();
+          const run = catalog.enqueue(state.bindingId, 'process');
+          state.runId = run.id;
+          save();
+          await worker.drain();
+          const done = catalog.getRun(run.id)!;
+          if (done.state !== 'published') {
+            signal.throwIfAborted();
+            throw new Error(done.error ?? 'PROCESSING_FAILED');
+          }
+          // Publication is the commit point. A later cancellation cannot undo it.
+          state.status = 'published';
+          state.processedVersion = state.taskVersion;
+          state.error = null;
+          save();
+        }
+      } catch (error) {
+        // Refused approval/cancel actions do not destroy a valid outstanding review.
+        if (!(error instanceof Error && error.message === 'POLICY_DENIED')) {
+          if (
+            state.status === 'publishing' &&
+            state.runId &&
+            catalog.getRun(state.runId)?.state === 'published'
+          ) {
+            state.status = 'published';
+            state.processedVersion = state.taskVersion;
+            state.error = null;
+          } else {
+            state.status = signal.aborted ? 'cancelled' : 'failed';
+            state.error = signal.aborted
+              ? 'CANCELLED'
+              : safeErrorCode(error, 'PROCESSING_FAILED');
+            state.reviewHash = null;
+            state.response = null;
+          }
+          save();
+        }
+        throw error;
+      }
+      return {
+        status: state.status,
+        projectId: state.projectId,
+        bindingId: state.bindingId,
+        sourceVersion: catalog.getBinding(state.bindingId)!.sourceVersion,
+        processedVersion: state.processedVersion,
+        taskId: state.task?.taskId ?? null,
+        taskPath,
+        previewPath,
+        reviewHash: state.reviewHash,
+        error: state.error,
+      };
+    } finally {
+      signal.removeEventListener('abort', abort);
+    }
+  } finally {
+    await coordinator?.stop();
+    catalog.close();
+  }
+}
