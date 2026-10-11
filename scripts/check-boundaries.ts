@@ -34,7 +34,13 @@ export function violations(path: string, source: string): string[] {
         (isBuiltin(target) &&
           !(
             /^apps\/web\/tests\/[^/]+\.spec\.ts$/.test(path) &&
-            ['node:fs', 'node:fs/promises'].includes(target)
+            [
+              'node:fs',
+              'node:fs/promises',
+              'node:child_process',
+              'node:events',
+              'node:path',
+            ].includes(target)
           )) ||
         /^(better-sqlite3|fastify|@fastify\/)/.test(target) ||
         (internal && to !== from && to !== 'packages/contracts');

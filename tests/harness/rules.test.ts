@@ -18,6 +18,9 @@ test('boundary allows ports/contracts and local modules', () => {
     ['packages/contracts/src/api.ts', '@sinclair/typebox'],
     ['apps/web/src/view.ts', './local.ts'],
     ['apps/web/tests/imports.spec.ts', 'node:fs/promises'],
+    ['apps/web/tests/memory.spec.ts', 'node:child_process'],
+    ['apps/web/tests/memory.spec.ts', 'node:events'],
+    ['apps/web/tests/memory.spec.ts', 'node:path'],
   ])
     assert.deepEqual(
       violations(file!, 'import x from ' + JSON.stringify(specifier)),
@@ -33,6 +36,9 @@ test('boundary rejects direct, relative, export, dynamic, require, import-type v
     ],
     ['apps/web/src/view.ts', 'const db = import("node:sqlite")'],
     ['apps/web/src/view.spec.ts', 'import x from "node:fs/promises"'],
+    ['apps/web/src/view.spec.ts', 'import x from "node:child_process"'],
+    ['apps/web/src/view.ts', 'import x from "node:events"'],
+    ['apps/web/src/view.ts', 'import x from "node:path"'],
     ['apps/web/tests/imports.spec.ts', 'import x from "node:sqlite"'],
     [
       'apps/web/tests/imports.spec.ts',

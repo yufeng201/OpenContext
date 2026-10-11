@@ -117,3 +117,7 @@ harness-only ZIP 是开始业务开发前的独立检查点，包含当时39个�
 显式本地 Agent worker 已实现软件适配：固定 Codex 0.161.0 参数、默认不执行、独立临时目录与环境白名单、schema/hash 校验、有界进程组超时/取消及最多三次手动尝试。持 owner 的 sender 与 worker 分开，仍需人工审核发布。当前只以 fake 可执行程序和合成 loopback 服务验证；独立复核发现的取消/完成竞态与退出码残留已补修复及回归。真实 Codex、专用认证、模型提炼质量与运行时沙箱未验收，不自动启用或改用户配置，见 [操作与边界](SESSION_MEMORY.md)。
 
 2026-10-11：0.161.0 原生 JSONL 新增 archive-v2。配对 function/custom 文本工具分别成为 tool 证据；有限 compacted.message 成为 summary，保存观察前缀而不重放替换历史。上传改为对应 archive-projection/v2，服务器重验配对，候选核验原始行/配对/摘要前缀 hash。独立审查发现的嵌套系统文本投影与伪造 evidence 声明已补修复和回归。确定性标记不提取 tool/summary；显式 fake executor 及人工审核链路已运行。0.159.2 仍为文本 profile，高级压缩/多媒体/继承历史及真实用户 session 未验收，完整范围见 [JSONL 说明](SESSION_JSONL_ASSESSMENT.md)。
+
+### 个人记忆管理入口
+
+已在现有管理界面补充 owner 专属「个人记忆」导航，复用现有文件目录和 Session Memory API；不新增记忆表、导入格式或模型执行方式。支持来源/任务状态、完整候选审核、固定版本来源、hash 固定批准、明确取消及失败重试；本地上传与 worker 执行仍由 CLI 显式完成。运行验证使用合成数据、临时目录、loopback 真 API 和 fake executor；不代表真实模型执行、真实凭据或生产部署验收。浏览器复现入口见 [Web README](../apps/web/README.md)，操作语义见 [Session Memory](SESSION_MEMORY.md)。

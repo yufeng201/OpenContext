@@ -13,6 +13,10 @@ export class ApiError extends Error {
 let sessionGeneration = 0;
 let onDenied: (() => void) | undefined;
 
+export function sessionRequestGeneration() {
+  return sessionGeneration;
+}
+
 export function resetSessionRequests() {
   sessionGeneration += 1;
 }

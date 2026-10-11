@@ -1,5 +1,6 @@
 import type { ReadOptions } from '@opencontext/contracts';
-import { markdownBlocks } from './lib/markdown';
+import { SafeMarkdown } from './components/safe-markdown';
+import { SessionMemory } from './features/session-memory';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -83,6 +84,7 @@ const views = [
   { id: 'plugins', label: '插件', icon: Puzzle },
   { id: 'search', label: '搜索', icon: Search },
   { id: 'runs', label: '任务', icon: Workflow },
+  { id: 'memory', label: '个人记忆', icon: FileText },
 ] as const;
 const selectClass =
   'h-10 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring';
@@ -312,12 +314,12 @@ function Workspace({
   });
   const project = projects.data?.find((entry) => entry.id === projectId);
   useEffect(() => {
-    if (!projectId && projects.data?.[0])
+    if (view !== 'memory' && !projectId && projects.data?.[0])
       setParams(
         { project: projects.data[0].id, view: 'files' },
         { replace: true },
       );
-  }, [projectId, projects.data, setParams]);
+  }, [projectId, projects.data, setParams, view]);
   const bindings = useQuery({
     queryKey: [...scope, 'bindings'],
     enabled: Boolean(project),
@@ -426,22 +428,24 @@ function Workspace({
           />
         ) : null}
         <nav aria-label="主要导航" className="auxiliary-navigation">
-          {views.map(({ id, label, icon: Icon }) => (
-            <Link
-              key={id}
-              to={`/?${new URLSearchParams({ project: projectId, view: id })}`}
-              aria-current={view === id ? 'page' : undefined}
-              className={cn(
-                'flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm lg:justify-start',
-                view === id
-                  ? 'bg-accent font-medium text-accent-foreground'
-                  : 'text-muted-foreground hover:bg-muted',
-              )}
-            >
-              <Icon className="hidden size-4 sm:block" />
-              {label}
-            </Link>
-          ))}
+          {views
+            .filter((item) => item.id !== 'memory' || session.role === 'owner')
+            .map(({ id, label, icon: Icon }) => (
+              <Link
+                key={id}
+                to={`/?${new URLSearchParams({ project: projectId, view: id })}`}
+                aria-current={view === id ? 'page' : undefined}
+                className={cn(
+                  'flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm lg:justify-start',
+                  view === id
+                    ? 'bg-accent font-medium text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-muted',
+                )}
+              >
+                <Icon className="hidden size-4 sm:block" />
+                {label}
+              </Link>
+            ))}
         </nav>
         {session.role === 'owner' && project ? (
           <details className="rounded-lg border p-3 text-sm">
@@ -493,7 +497,14 @@ function Workspace({
           <Alert className="mb-5">{errorText(queryFailure)}</Alert>
         ) : null}
         {projects.isPending ? <p role="status">正在读取空间…</p> : null}
-        {!projects.isPending && !project ? (
+        {view === 'memory' ? (
+          <SessionMemory
+            key={projectId}
+            generation={generation}
+            owner={session.role === 'owner'}
+          />
+        ) : null}
+        {view !== 'memory' && !projects.isPending && !project ? (
           <Card>
             <CardHeader>
               <CardTitle>
@@ -1337,38 +1348,6 @@ function Reader({
         ) : null}
       </CardContent>
     </Card>
-  );
-}
-
-function SafeMarkdown({ text }: { text: string }) {
-  // Deliberately support only inert text structure: no raw HTML, URL, or executable content.
-  return (
-    <>
-      {markdownBlocks(text).map((block, index) => {
-        const line = block.text;
-        if (block.kind === 'code')
-          return (
-            <pre key={index}>
-              <code>{line}</code>
-            </pre>
-          );
-        if (line.startsWith('### '))
-          return <h4 key={index}>{line.slice(4)}</h4>;
-        if (line.startsWith('## ')) return <h3 key={index}>{line.slice(3)}</h3>;
-        if (line.startsWith('# ')) return <h2 key={index}>{line.slice(2)}</h2>;
-        if (/^[-*] /.test(line))
-          return (
-            <p className="markdown-list" key={index}>
-              • {line.slice(2)}
-            </p>
-          );
-        return line ? (
-          <p key={index}>{line}</p>
-        ) : (
-          <div className="markdown-space" key={index} />
-        );
-      })}
-    </>
   );
 }
 
