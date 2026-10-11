@@ -115,3 +115,5 @@ harness-only ZIP 是开始业务开发前的独立检查点，包含当时39个�
 显式客户端一次性上传已实现：owner-only 控制面接收元数据最小化文本投影，uploadId/hash 联合 CAS、防重放覆盖、单次网络重试及取消语义；服务器保持唯一写者。合成 client/server 两目录通过 loopback CLI→模拟 worker→审核→CLI/MCP 回归，不是实际 Mac 多机器或真实模型验收，见 [session 操作指南](SESSION_MEMORY.md)。
 
 显式本地 Agent worker 已实现软件适配：固定 Codex 0.161.0 参数、默认不执行、独立临时目录与环境白名单、schema/hash 校验、有界进程组超时/取消及最多三次手动尝试。持 owner 的 sender 与 worker 分开，仍需人工审核发布。当前只以 fake 可执行程序和合成 loopback 服务验证；独立复核发现的取消/完成竞态与退出码残留已补修复及回归。真实 Codex、专用认证、模型提炼质量与运行时沙箱未验收，不自动启用或改用户配置，见 [操作与边界](SESSION_MEMORY.md)。
+
+2026-10-11：0.161.0 原生 JSONL 新增 archive-v2。配对 function/custom 文本工具分别成为 tool 证据；有限 compacted.message 成为 summary，保存观察前缀而不重放替换历史。上传改为对应 archive-projection/v2，服务器重验配对，候选核验原始行/配对/摘要前缀 hash。独立审查发现的嵌套系统文本投影与伪造 evidence 声明已补修复和回归。确定性标记不提取 tool/summary；显式 fake executor 及人工审核链路已运行。0.159.2 仍为文本 profile，高级压缩/多媒体/继承历史及真实用户 session 未验收，完整范围见 [JSONL 说明](SESSION_JSONL_ASSESSMENT.md)。

@@ -92,6 +92,12 @@ export async function createAgentTask(
       return [];
     },
   });
+  messages.sort(
+    (a, b) =>
+      a.message.sessionId.localeCompare(b.message.sessionId, 'en') ||
+      (a.message.evidence?.sourceLine ?? 0) -
+        (b.message.evidence?.sourceLine ?? 0),
+  );
   const task: AgentTask = {
     schema: 'opencontext.local-agent-task/v1',
     taskId,

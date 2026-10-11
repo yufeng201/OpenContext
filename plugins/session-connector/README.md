@@ -84,3 +84,8 @@ pnpm exec vitest run plugins/session-connector/tests/session.test.ts
 Tests use synthetic bytes only. They cover raw preservation, stable IDs, duplicate/conflicting exports, scope, completeness, deletion, limits, cancellation, hash mismatch, secret preflight and known raw-only tools.
 
 Official format evidence: [Codex app-server](https://learn.chatgpt.com/docs/app-server), [Claude session browser](https://platform.claude.com/cookbook/claude-agent-sdk-05-building-a-session-browser), [Claude SDK session reader](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/_internal/sessions.py), [Claude SDK content types](https://github.com/anthropics/claude-agent-sdk-python/blob/main/src/claude_agent_sdk/types.py). Codex native shape was checked against local 0.159.2 generated schema; Claude evidence is official source, not a locally installed SDK test. Claude `/export` is plain text and is not this JSON format.
+
+
+## Native JSONL archive profile
+
+The separate opt-in 0.161.0 JSONL connector supports paired function/custom text calls and outputs, plus limited textual compaction checkpoints. It emits independent tool/summary evidence with source-line and pairing hashes; it does not replay replacement history or turn evidence into user authorization. Ordinary v1 imports cannot supply this archive extension. See [supported/rejected records and projection policy](../../docs/SESSION_JSONL_ASSESSMENT.md). All fixtures and executable-worker tests are synthetic; no real account or model was used.

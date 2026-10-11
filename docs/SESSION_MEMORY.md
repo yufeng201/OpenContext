@@ -43,7 +43,7 @@ pnpm session-memory:online review
 
 `directory` 是 **OpenContext 服务器的本地绝对路径**。Mac CLI 只发送控制请求，不能让云端读取 Mac 的 `/Users/...`。目录模式只适合同机部署或操作员已把文件放到服务器的情形。异地主机可使用下一节的显式客户端上传模式，无需让服务器读取 Mac 路径；没有自动采集。不要把配置和 worker 响应放入来源目录。原生记录中的 `cwd` 只保留为数据，绝不据此打开路径。
 
-两个 profile 分别针对公开固定版本 Codex 0.159.2/0.161.0 的 legacy 顶层文本 rollout；仅发布已完成 turn 的原始前缀，不声明整个会话已经结束。原始 JSONL 前缀、转换 v1 和转换凭据分别保存，包含 SHA256、已消费字节数和解析器身份；候选依赖这些固定 revision。未知版本/事件、工具 response、compaction、paginated/fork/subagent 历史均失败关闭。末尾无换行的记录（含不完整 UTF-8）等待，下次同步重读；中部坏行导致整轮拒绝。完整边界、重复、截断及信任边界详见适配说明。
+两个 profile 分别针对公开固定版本 Codex 0.159.2/0.161.0 的 legacy 顶层文本 rollout；仅发布已完成 turn 的原始前缀，不声明整个会话已经结束。原始 JSONL 前缀、转换 v1 和转换凭据分别保存，包含 SHA256、已消费字节数和解析器身份；候选依赖这些固定 revision。未知版本/事件、paginated/fork/subagent 历史失败关闭；0.161.0 新增成对文本工具和有限压缩档案证据，准确范围见适配说明。末尾无换行的记录（含不完整 UTF-8）等待，下次同步重读；中部坏行导致整轮拒绝。完整边界、重复、截断及信任边界详见适配说明。
 
 可直接运行有界合成演示：
 
@@ -84,7 +84,7 @@ pnpm session-memory:online review
 
 阅读预览后，使用其中的当前 TASK_ID/REVIEW_SHA256 执行 `pnpm session-memory:online approve TASK_ID REVIEW_SHA256`。在上传后修改 JSONL，再运行同一 upload 命令即可追加同步；没有 daemon、Hook、默认目录发现或定时器。`--directory` 把当前选择作为完整集合；没有选中的旧 session/消息会按已有 full 快照规则 tombstone，不能把一次 `--file` 当成追加第二个独立文件的集合合并。空集合拒绝。需要保留多份会话时，每次明确选择包含全部目标文件的目录。
 
-客户端插件先校验完整文件，等待末尾半行，仅提取已完成 turn 的 user/assistant 文本和稳定身份。上传的是 **text-projection/v1 投影**，不是原始字节：不发本地文件名、绝对路径、cwd、环境、系统/developer 指令、工具或无关 metadata；服务器校验投影必须可精确重建，不能靠附加字段夹带元数据。用户/assistant 正文本身若包含路径或秘密，不会猜测删改；操作员仍应先审核明确选中的内容。已知秘密字段检查不是完整秘密检测。
+客户端插件先校验完整文件，等待末尾半行。0.159.2 上传 **text-projection/v1**；0.161.0 上传 **archive-projection/v2**，新增成对工具文本与有限压缩摘要。两者都不是本机原始字节，不发文件名/cwd/环境等机器 metadata，系统/developer 文本（包括 replacement 内）置为占位；服务器校验投影必须可精确重建，不能靠附加字段夹带元数据。用户/assistant、工具参数/结果和压缩摘要正文若包含路径或秘密，不会猜测删改；操作员仍应先审核明确选中的内容。已知秘密字段检查不是完整秘密检测。
 
 每个本地文件最多 1 MiB、集合最多 8 文件；上传 envelope 的 UTF-8 JSON 最多 1 MiB，HTTP body 最多 2,105,344 字节，服务器解析后来源仍受 500 文件/10 MiB 约束。请求只带 cliVersion、文本投影、原始消费前缀 hash/bytes 和 CAS 字段，不读取/上传本地环境变量（仅已有连接地址和 token 用于请求）。每次全量有界重放；相同前缀在追加半行或重启后保持幂等，无重复候选。截断/替换按已验证完整集合重置，坏行和未知语义在发送或写入前拒绝。
 
@@ -199,4 +199,4 @@ state.json 用原子替换和 fsync 保存操作断点；它与 task/schema/revi
 
 `cancel JOB_DIR` 请求取消当前尝试；运行状态在进程停止后变为 cancelled。取消与完成使用同一原子状态锁：完成已占锁时取消返回 RESOURCE_BUSY，已完成则 POLICY_DENIED，不能据失败的取消命令推断任务已取消。SIGINT/SIGTERM 同样停止当前尝试。独立 setsid 后代、父进程被 SIGKILL、物理断电及恶意文件竞争没有 OS 级保障；遗留锁不会自动强拆，应确认进程已退出后重新 prepare 新任务目录。临时 job 含任务及候选，操作员应在工作结束后按私有数据策略清理，不属于服务器联合备份。
 
-合成回归入口 `pnpm demo:session-worker`：fake executable → 固定响应 → 独立提交 → 人工审核门禁。完整 worker 测试还覆盖超时、取消/完成竞争、手动重试、幂等缓存、退出码、stderr 清除、大小/schema/hash/路径拒绝和迟到响应。当前只验证 Linux；Windows 明确拒绝，macOS 未运行验收。JSONL 支持范围不变，工具/compaction/继承或分页记录仍未新增支持。
+合成回归入口 `pnpm demo:session-worker`：fake executable → 固定响应 → 独立提交 → 人工审核门禁。完整 worker 测试还覆盖超时、取消/完成竞争、手动重试、幂等缓存、退出码、stderr 清除、大小/schema/hash/路径拒绝和迟到响应。当前只验证 Linux；Windows 明确拒绝，macOS 未运行验收。0.161.0 JSONL 现支持成对文本工具和有限压缩摘要证据，继承/分页及复杂压缩状态仍拒绝，见 [准确矩阵](SESSION_JSONL_ASSESSMENT.md)。

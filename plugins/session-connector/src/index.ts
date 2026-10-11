@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { Type } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
+import { SessionEvidenceSchema } from '@opencontext/contracts';
 import type {
   ConnectorInvocation,
   ConnectorOutput,
@@ -136,10 +138,17 @@ export function screenSession(value: unknown, depth = 0): void {
   }
 }
 
+function checkedEvidence(value: unknown): NormalizedSessionMessage['evidence'] {
+  if (value === undefined) return undefined;
+  if (!Value.Check(SessionEvidenceSchema, value))
+    fail('INVALID_SESSION', 'Invalid evidence');
+  return value;
+}
 function parse(
   raw: string,
   provider: Provider,
   projectScope: string,
+  allowArchiveEvidence: boolean,
 ): {
   sessionId: string;
   messages: NormalizedSessionMessage[];
@@ -184,9 +193,10 @@ function parse(
   const seen = new Map<string, string>();
   const add = (
     messageId: string,
-    role: 'user' | 'assistant',
+    role: NormalizedSessionMessage['role'],
     content: string,
     turnId?: string,
+    evidence?: NormalizedSessionMessage['evidence'],
   ): void => {
     const message: NormalizedSessionMessage = {
       schema: 'opencontext.session-message/v1',
@@ -196,6 +206,7 @@ function parse(
       messageId,
       ...(turnId === undefined ? {} : { turnId }),
       role,
+      ...(evidence ? { evidence } : {}),
       text: content,
     };
     const key = JSON.stringify([turnId ?? null, messageId]);
@@ -244,16 +255,49 @@ function parse(
       for (const value of array(turn['items'])) {
         const item = object(value);
         const messageId = id(item['id']);
+        if (
+          !allowArchiveEvidence &&
+          (item['evidence'] !== undefined ||
+            item['type'] === 'opencontextEvidence')
+        )
+          fail(
+            'UNSUPPORTED_SESSION_ITEM',
+            'Archive evidence requires the native JSONL connector',
+          );
         if (item['type'] === 'userMessage')
           add(
             messageId,
             'user',
             textBlocks(item['content'], provider, preserved),
             turnId,
+            checkedEvidence(item['evidence']),
           );
         else if (item['type'] === 'agentMessage')
-          add(messageId, 'assistant', text(item['text']), turnId);
-        else {
+          add(
+            messageId,
+            'assistant',
+            text(item['text']),
+            turnId,
+            checkedEvidence(item['evidence']),
+          );
+        else if (item['type'] === 'opencontextEvidence') {
+          const evidence = checkedEvidence(item['evidence']);
+          if (
+            !evidence ||
+            !['tool', 'summary'].includes(String(item['role'])) ||
+            (item['role'] === 'summary'
+              ? evidence.kind !== 'compaction'
+              : !['tool_call', 'tool_result'].includes(evidence.kind))
+          )
+            fail('INVALID_SESSION', 'Invalid evidence kind');
+          add(
+            messageId,
+            item['role'] as 'tool' | 'summary',
+            text(item['text']),
+            turnId,
+            evidence,
+          );
+        } else {
           // Confirmed against Codex 0.159.2 app-server ThreadItem schema. Keep
           // tool payload opaque in exact raw; never convert tool output to rules.
           const required: Record<string, string[]> = {
@@ -336,6 +380,7 @@ export async function importSessions(
   provider: Provider,
   input: ConnectorInvocation,
   context: ExecutionContext,
+  allowArchiveEvidence = false,
 ): Promise<ConnectorOutput> {
   cancelled(context);
   const projectScope = input.config['projectScope'];
@@ -394,6 +439,7 @@ export async function importSessions(
       raw,
       provider,
       projectScope,
+      allowArchiveEvidence,
     );
     const old = sessions.get(sessionId);
     if (old !== undefined) {
@@ -482,7 +528,7 @@ function definition(provider: Provider): ConnectorDefinition {
         fail('INVALID_CONFIG', 'Missing project scope');
       if (Buffer.byteLength(content) > MAX_IMPORT_BYTES)
         fail('BYTE_LIMIT', 'Import exceeds 1 MiB');
-      parse(content, provider, config['projectScope']);
+      parse(content, provider, config['projectScope'], false);
     },
     invoke: (input, context) => importSessions(provider, input, context),
   };

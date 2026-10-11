@@ -15,6 +15,14 @@ import {
   normalizedJsonlOutput,
 } from './jsonl-directory.ts';
 
+function minimizeMessage(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return payload['type'] === 'message' &&
+    ['system', 'developer'].includes(String(payload['role']))
+    ? { ...payload, content: [{ type: 'input_text', text: '[omitted]' }] }
+    : payload;
+}
 /** A text projection, not the original bytes. All conversion stays in this plugin. */
 export function projectSession(
   parsed: ReturnType<typeof parseCodexJsonl>,
@@ -35,8 +43,17 @@ export function projectSession(
       };
     };
   };
-  const record = (type: string, payload: Record<string, unknown>) =>
-    JSON.stringify({ timestamp: '1970-01-01T00:00:00Z', type, payload }) + '\n';
+  const record = (
+    type: string,
+    payload: Record<string, unknown>,
+    ordinal?: number | null,
+  ) =>
+    JSON.stringify({
+      timestamp: '1970-01-01T00:00:00Z',
+      ...(ordinal == null ? {} : { ordinal }),
+      type,
+      payload,
+    }) + '\n';
   let output = record('session_meta', {
     id: parsed.sessionId,
     session_id: parsed.sessionId,
@@ -47,6 +64,53 @@ export function projectSession(
     source: 'cli',
     history_mode: 'legacy',
   });
+  if (version === '0.161.0') {
+    // Preserve validated tool/compaction order and payloads. Reparse the exact wire
+    // projection on the server; never turn them into ordinary assistant messages.
+    for (const line of parsed.raw.trimEnd().split('\n')) {
+      const source = JSON.parse(line) as {
+        type: string;
+        ordinal?: number | null;
+        payload: Record<string, unknown>;
+      };
+      if (source.type === 'session_meta') continue;
+      let payload = source.payload;
+      if (source.type === 'turn_context')
+        payload = { turn_id: payload['turn_id'] };
+      else if (source.type === 'event_msg') {
+        // UI mirrors are represented by their known type, not duplicated text/paths.
+        payload = {
+          type: payload['type'],
+          ...([
+            'task_started',
+            'turn_started',
+            'task_complete',
+            'turn_complete',
+          ].includes(String(payload['type']))
+            ? { turn_id: payload['turn_id'] }
+            : {}),
+        };
+      } else if (
+        source.type === 'response_item' &&
+        payload['type'] === 'reasoning'
+      ) {
+        payload = { type: 'reasoning', summary: [], encrypted_content: null };
+      }
+      if (source.type === 'response_item') payload = minimizeMessage(payload);
+      if (
+        source.type === 'compacted' &&
+        Array.isArray(payload['replacement_history'])
+      )
+        payload = {
+          ...payload,
+          replacement_history: payload['replacement_history'].map((item) =>
+            minimizeMessage(item as Record<string, unknown>),
+          ),
+        };
+      output += record(source.type, payload, source.ordinal);
+    }
+    return output;
+  }
   for (const turn of canonical.payload.thread.turns) {
     output += record('event_msg', { type: 'task_started', turn_id: turn.id });
     for (const item of turn.items) {
@@ -113,7 +177,10 @@ export function validateSessionUpload(
       receipt: {
         ...p.receipt,
         transport: {
-          profile: 'text-projection/v1' as const,
+          profile:
+            version === '0.161.0'
+              ? ('archive-projection/v2' as const)
+              : ('text-projection/v1' as const),
           clientPrefixHash: file.clientPrefixHash,
           clientPrefixBytes: file.clientPrefixBytes,
         },

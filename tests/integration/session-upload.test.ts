@@ -150,8 +150,14 @@ it('pins both compatible legacy text profiles and rejects new Guardian metadata 
     scope,
     '0.159.2',
   );
-  expect(modern.canonical).toBe(old.canonical);
-  expect(modern.receipt.parser).toBe('codex-rollout/0.161.0-legacy-text-v1');
+  const withoutEvidence = (value: string) =>
+    JSON.parse(value, (key, value: unknown) =>
+      key === 'evidence' ? undefined : value,
+    );
+  expect(withoutEvidence(modern.canonical)).toEqual(
+    withoutEvidence(old.canonical),
+  );
+  expect(modern.receipt.parser).toBe('codex-rollout/0.161.0-archive-v2');
   expect(() => parseCodexJsonl(Buffer.from(original), scope)).toThrow(
     'UNSUPPORTED_SESSION_JSONL',
   );
@@ -171,8 +177,14 @@ it('projects text only, preserving message identity while removing machine metad
   expect(serialized).not.toContain('environment');
   expect(serialized).toContain('maple-harbor');
   const result = validateSessionUpload(packet, scope, '0.161.0')[0]!;
-  expect(result.canonical).toBe(
-    parseCodexJsonl(Buffer.from(original), scope, '0.161.0').canonical,
+  const withoutEvidence = (value: string) =>
+    JSON.parse(value, (key, value: unknown) =>
+      key === 'evidence' ? undefined : value,
+    );
+  expect(withoutEvidence(result.canonical)).toEqual(
+    withoutEvidence(
+      parseCodexJsonl(Buffer.from(original), scope, '0.161.0').canonical,
+    ),
   );
   expect(result.receipt.transport.clientPrefixHash).not.toBe(
     result.receipt.originalHash,

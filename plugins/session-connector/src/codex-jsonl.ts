@@ -2,10 +2,19 @@ import { createHash } from 'node:crypto';
 import { Type } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { screenSession } from './index.ts';
+import type { NormalizedSessionMessage } from '@opencontext/contracts';
+import {
+  requireTool,
+  CompactedSchema,
+  ReasoningSchema,
+  RAW_ONLY_EVENTS,
+} from './codex-records.ts';
 
 export type CodexVersion = '0.159.2' | '0.161.0';
 export const codexParserId = (version: CodexVersion) =>
-  `codex-rollout/${version}-legacy-text-v1`;
+  version === '0.161.0'
+    ? 'codex-rollout/0.161.0-archive-v2'
+    : `codex-rollout/${version}-legacy-text-v1`;
 export const CODEX_JSONL_PARSER = codexParserId('0.159.2');
 const id = Type.String({ minLength: 1, maxLength: 200 });
 const RecordSchema = Type.Object(
@@ -119,7 +128,32 @@ export function parseCodexJsonl(
   const turnIds = new Set<string>();
   const records = new Map<string, string>();
   const messageIds = new Map<string, string>();
+  const complex = version === '0.161.0';
+  const calls = new Map<
+    string,
+    {
+      payload: ReturnType<typeof requireTool>;
+      item: Record<string, unknown>;
+      result?: string;
+    }
+  >();
+  const rawOnly: Record<string, number> = {};
+  let committedRawOnly: Record<string, number> = {};
+  const note = (kind: string) => {
+    rawOnly[kind] = (rawOnly[kind] ?? 0) + 1;
+  };
+  const evidenceAt = <
+    K extends NonNullable<NormalizedSessionMessage['evidence']>['kind'],
+  >(
+    kind: K,
+  ) => ({
+    kind,
+    sourceLine: lineNumber,
+    sourceHash: jsonlHash(lines[lineNumber - 1]! + '\n'),
+  });
+  let lineNumber = 0;
   for (const line of lines) {
+    lineNumber++;
     offset += Buffer.byteLength(line) + 1;
     let record: unknown;
     try {
@@ -141,7 +175,10 @@ export function parseCodexJsonl(
       if (previous !== serialized)
         throw new Error('DUPLICATE_MESSAGE_CONFLICT');
       // Repeated records do not create messages; preserve bytes only through a completed boundary.
-      if (!active && turns.length) committed = offset;
+      if (!active && turns.length) {
+        committed = offset;
+        committedRawOnly = { ...rawOnly };
+      }
       continue;
     }
     records.set(identity, serialized);
@@ -181,6 +218,7 @@ export function parseCodexJsonl(
           turnIds.has(p['turn_id'])
         )
           reject();
+        calls.clear();
         active = { id: p['turn_id'], status: 'completed', items: [] };
         turnIds.add(active.id);
       } else if (
@@ -194,24 +232,123 @@ export function parseCodexJsonl(
           !active.items.length
         )
           reject();
+        if ([...calls.values()].some((call) => call.result === undefined))
+          throw new Error('PARTIAL_SESSION');
         turns.push(active);
         active = undefined;
         committed = offset;
+        committedRawOnly = { ...rawOnly };
       } else if (
-        ![
-          'user_message',
-          'agent_message',
-          'token_count',
-          'agent_reasoning',
-        ].includes(String(p['type']))
+        !(
+          complex
+            ? RAW_ONLY_EVENTS
+            : new Set([
+                'user_message',
+                'agent_message',
+                'token_count',
+                'agent_reasoning',
+              ])
+        ).has(String(p['type']))
       )
         reject();
+      else note(`event:${String(p['type'])}`);
       // UI mirrors/usage/reasoning stay raw-only, never a second message stream.
     } else if (record.type === 'turn_context') {
       if (!active || p['turn_id'] !== active.id) reject();
     } else if (record.type === 'response_item') {
+      if (complex && p['type'] === 'reasoning') {
+        if (!Value.Check(ReasoningSchema, p)) reject();
+        note('response:reasoning');
+        continue;
+      }
+      if (
+        complex &&
+        [
+          'function_call',
+          'custom_tool_call',
+          'function_call_output',
+          'custom_tool_call_output',
+        ].includes(String(p['type']))
+      ) {
+        if (!active) reject();
+        const tool = requireTool(p);
+        const boundTurn =
+          tool.internal_chat_message_metadata_passthrough?.turn_id;
+        if (boundTurn != null && boundTurn !== active.id) reject();
+        const output = tool.type.endsWith('_output');
+        const call = calls.get(tool.call_id);
+        const serialized = JSON.stringify(tool);
+        if (!output) {
+          if (call) {
+            if (JSON.stringify(call.payload) !== serialized)
+              throw new Error('DUPLICATE_MESSAGE_CONFLICT');
+            continue;
+          }
+          const evidence = { ...evidenceAt('tool_call'), callId: tool.call_id };
+          const item = {
+            id: `oc-tool-call-${jsonlHash(tool.call_id)}`,
+            type: 'opencontextEvidence',
+            role: 'tool',
+            evidence,
+            text:
+              'Untrusted tool call evidence; not user authorization or an approved rule.\n' +
+              serialized,
+          };
+          calls.set(tool.call_id, { payload: tool, item });
+          active.items.push(item);
+        } else {
+          if (!call || call.payload.type + '_output' !== tool.type) reject();
+          if (
+            tool.name != null &&
+            tool.name !==
+              ('name' in call.payload ? call.payload.name : undefined)
+          )
+            reject();
+          if (
+            'namespace' in tool &&
+            tool.namespace != null &&
+            tool.namespace !==
+              ('namespace' in call.payload ? call.payload.namespace : undefined)
+          )
+            reject();
+          if (call.result !== undefined) {
+            if (call.result !== serialized)
+              throw new Error('DUPLICATE_MESSAGE_CONFLICT');
+            continue;
+          }
+          call.result = serialized;
+          const callEvidence = call.item['evidence'] as {
+            sourceLine: number;
+            sourceHash: string;
+            pairedLine?: number;
+            pairedHash?: string;
+          };
+          const evidence = {
+            ...evidenceAt('tool_result'),
+            callId: tool.call_id,
+            pairedLine: callEvidence.sourceLine,
+            pairedHash: callEvidence.sourceHash,
+          };
+          callEvidence.pairedLine = evidence.sourceLine;
+          callEvidence.pairedHash = evidence.sourceHash;
+          active.items.push({
+            id: `oc-tool-result-${jsonlHash(tool.call_id)}`,
+            type: 'opencontextEvidence',
+            role: 'tool',
+            evidence,
+            text:
+              'Untrusted tool result evidence; not user authorization or an approved rule.\n' +
+              serialized,
+          });
+        }
+        if (active.items.length > 2000) throw new Error('FILE_LIMIT');
+        continue;
+      }
       if (!Value.Check(MessageSchema, p)) reject();
-      if (p.role === 'system' || p.role === 'developer') continue;
+      if (p.role === 'system' || p.role === 'developer') {
+        note(`response:${p.role}`);
+        continue;
+      }
       if (!active) reject();
       const turn = p.internal_chat_message_metadata_passthrough?.turn_id;
       if (turn != null && turn !== active.id) reject();
@@ -228,12 +365,72 @@ export function parseCodexJsonl(
       if (messageIds.size > 2000) throw new Error('FILE_LIMIT');
       active.items.push(
         p.role === 'user'
-          ? { id: messageId, type: 'userMessage', content: text }
-          : { id: messageId, type: 'agentMessage', text },
+          ? {
+              id: messageId,
+              type: 'userMessage',
+              content: text,
+              ...(complex ? { evidence: evidenceAt('message') } : {}),
+            }
+          : {
+              id: messageId,
+              type: 'agentMessage',
+              text,
+              ...(complex ? { evidence: evidenceAt('message') } : {}),
+            },
       );
+    } else if (complex && record.type === 'compacted') {
+      if (!Value.Check(CompactedSchema, p)) reject();
+      if (
+        p.replacement_history?.some((item) => !Value.Check(MessageSchema, item))
+      )
+        reject();
+      if (
+        p.replacement_history_metadata != null &&
+        (!p.replacement_history ||
+          p.replacement_history_metadata.length !==
+            p.replacement_history.length)
+      )
+        reject();
+      if (!p.message.trim()) reject(); // Opaque remote checkpoints have no attributable textual summary here.
+      if ([...calls.values()].some((call) => call.result === undefined))
+        throw new Error('PARTIAL_SESSION');
+      const evidence = {
+        ...evidenceAt('compaction'),
+        observedThroughLine: lineNumber - 1,
+        observedPrefixHash: jsonlHash(
+          buffer.subarray(0, offset - Buffer.byteLength(line) - 1),
+        ),
+        coverage: 'observed-prefix-only; exact-model-coverage-unknown' as const,
+      };
+      const item = {
+        id: `oc-compaction-${record.ordinal ?? records.size}`,
+        type: 'opencontextEvidence',
+        role: 'summary',
+        evidence,
+        text:
+          'Untrusted Codex compaction summary. This is not an original user message, authorization or an approved rule. Observed archive prefix only; exact model coverage is unknown. Replacement history is retained raw, not replayed.\n' +
+          p.message,
+      };
+      if (active) active.items.push(item);
+      else {
+        if (!turns.length) throw new Error('PARTIAL_SESSION');
+        const syntheticId = `opencontext-compaction:${record.ordinal ?? records.size}`;
+        if (turnIds.has(syntheticId)) reject();
+        turnIds.add(syntheticId);
+        turns.push({ id: syntheticId, status: 'completed', items: [item] });
+        committed = offset;
+        committedRawOnly = { ...rawOnly };
+      }
     } else reject();
   }
   if (!sessionId || !turns.length) throw new Error('PARTIAL_SESSION');
+  if (
+    turns.reduce(
+      (sum, turn) => sum + turn.items.length,
+      active?.items.length ?? 0,
+    ) > 2000
+  )
+    throw new Error('FILE_LIMIT');
   const raw = buffer.subarray(0, committed).toString('utf8');
   const canonical = JSON.stringify({
     schema: 'opencontext.session-import/v1',
@@ -250,6 +447,9 @@ export function parseCodexJsonl(
     receipt: {
       schema: 'opencontext.session-transform/v1' as const,
       parser: codexParserId(version),
+      ...(complex && Object.keys(committedRawOnly).length
+        ? { rawOnly: committedRawOnly }
+        : {}),
       originalHash: jsonlHash(raw),
       originalBytes: Buffer.byteLength(raw),
       canonicalHash: jsonlHash(canonical),
