@@ -560,7 +560,11 @@ export async function sessionMemory(
               state.response,
               context,
             );
+            const currentBinding = catalog.getBinding(state.bindingId);
             refusedReplacement =
+              currentBinding?.active === true &&
+              currentBinding.projectId === state.projectId &&
+              currentBinding.sourceVersion === state.taskVersion &&
               catalog.head(state.projectId) === priorInput.inputCommitId &&
               agentHash(previous) === state.reviewHash &&
               readLocalText(previewPath, 8_388_608) === memoryPreview(previous);

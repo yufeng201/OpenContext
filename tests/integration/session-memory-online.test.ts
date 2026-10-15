@@ -609,3 +609,102 @@ it('recovered publication is readable through loopback CLI/MCP only in the autho
   const revoked = await read(reader.token);
   expect(revoked.text).not.toContain('cedar-lighthouse');
 });
+
+it('concurrent approvals and retries produce one publication and one replacement task', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  await f.post('cancel', { taskId: first.taskId });
+  const retries = await Promise.all(
+    Array.from({ length: 8 }, () => f.post('retry', { taskId: first.taskId })),
+  );
+  const accepted = retries.filter((r) => r.statusCode === 200);
+  expect(accepted.length).toBeGreaterThan(0);
+  expect(new Set(accepted.map((r) => r.json().taskId)).size).toBe(1);
+  for (const r of retries) expect([200, 409, 429]).toContain(r.statusCode);
+  const taskId = accepted[0]!.json().taskId;
+  expect(taskId).not.toBe(first.taskId);
+  const reviewed = (await f.post('submit', await f.response())).json();
+  const approvals = await Promise.all(
+    Array.from({ length: 8 }, () =>
+      f.post('approve', { taskId, reviewHash: reviewed.reviewHash }),
+    ),
+  );
+  for (const r of approvals) {
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().status).toBe('published');
+  }
+  const runs = f.application.catalog.listRuns(first.projectId!);
+  expect(runs.filter((run) => run.kind === 'sync')).toHaveLength(2);
+  expect(runs.filter((run) => run.kind === 'process')).toHaveLength(1);
+  expect(
+    f.application.catalog
+      .currentFiles(first.projectId!)
+      .filter((file) => file.collection === 'derived'),
+  ).toHaveLength(1);
+  expect((await f.post('retry', { taskId: first.taskId })).statusCode).toBe(
+    409,
+  );
+  expect((await f.get()).json()).toMatchObject({ status: 'published', taskId });
+});
+
+it('recovery of a committed publication does not bypass a revoked binding', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const review = (await f.post('submit', await f.response())).json();
+  const approval = { taskId: first.taskId, reviewHash: review.reviewHash };
+  expect((await f.post('approve', approval)).statusCode).toBe(200);
+  const path = resolve(f.dataRoot, 'plugin-state/session-memory/state.json');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(
+    path,
+    JSON.stringify({ ...state, status: 'publishing', processedVersion: null }),
+  );
+  f.application.catalog.revokeBinding(first.bindingId!);
+  await f.restart();
+  const head = f.application.catalog.head(first.projectId!);
+  expect((await f.post('approve', approval)).statusCode).toBe(409);
+  expect((await f.get('/review')).statusCode).toBe(409);
+  expect(f.application.catalog.head(first.projectId!)).toBe(head);
+  expect(JSON.parse(readFileSync(path, 'utf8')).status).toBe('publishing');
+  expect(
+    f.application.catalog
+      .listRuns(first.projectId!)
+      .filter((run) => run.kind === 'process'),
+  ).toHaveLength(1);
+});
+
+it('does not retain a prior review when its binding is revoked during replacement validation', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const response = await f.response();
+  await f.post('submit', response);
+  const catalog = f.application.catalog;
+  const currentFiles = catalog.currentFiles;
+  let reads = 0;
+  catalog.currentFiles = function (projectId) {
+    const files = currentFiles.call(this, projectId);
+    if (++reads === 2)
+      queueMicrotask(() => catalog.revokeBinding(first.bindingId!));
+    return files;
+  };
+  try {
+    const invalid = structuredClone(response);
+    invalid.candidates[0]!.fileId = 'synthetic-invalid-replacement';
+    expect((await f.post('submit', invalid)).statusCode).toBeGreaterThanOrEqual(
+      400,
+    );
+  } finally {
+    catalog.currentFiles = currentFiles;
+  }
+  expect(catalog.getBinding(first.bindingId!)?.active).toBe(false);
+  const state = JSON.parse(
+    readFileSync(
+      resolve(f.dataRoot, 'plugin-state/session-memory/state.json'),
+      'utf8',
+    ),
+  );
+  expect(state.status).toBe('failed');
+  expect(state.response).toBeNull();
+  expect(state.reviewHash).toBeNull();
+  expect((await f.get('/review')).statusCode).toBe(409);
+});
