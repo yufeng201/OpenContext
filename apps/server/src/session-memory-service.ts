@@ -12,9 +12,12 @@ import {
   createReviewedAgentDefinition,
   AgentResponseSchema,
   agentHash,
+  reviewAgentResponse,
 } from '../../../plugins/session-candidates/src/local-agent.ts';
 import {
   sessionMemory,
+  memoryInput,
+  memoryPreview,
   memoryConnector,
   memoryVersion,
   memoryBindingConfig,
@@ -127,20 +130,46 @@ export class SessionMemoryService {
       throw new Error('NOT_FOUND');
     return { task: state.task, responseSchema: AgentResponseSchema };
   }
-  review() {
+  async review(host: Pick<MemoryHost, 'catalog' | 'store'>) {
     if (!this.config.enabled) throw new Error('NOT_FOUND');
     const state = this.state();
     if (!this.config.enabled || state?.status !== 'review' || !state.reviewHash)
       throw new Error('NOT_FOUND');
+    if (!state.task || !state.response) throw new Error('CHECKPOINT_CORRUPT');
+    const input = memoryInput(state, host.catalog, host.store);
+    const output = await reviewAgentResponse(
+      state.task,
+      input,
+      state.response,
+      {
+        signal: new AbortController().signal,
+        workDir: resolve(this.config.dataRoot, 'plugin-state/session-memory'),
+      },
+    );
+    const markdown = readLocalText(
+      resolve(this.config.dataRoot, 'plugin-state/session-memory/review.md'),
+      8_388_608,
+    );
+    const current = this.state();
+    if (
+      host.catalog.head(state.projectId) !== input.inputCommitId ||
+      agentHash(output) !== state.reviewHash ||
+      markdown !== memoryPreview(output) ||
+      current?.status !== 'review' ||
+      current.task?.taskId !== state.task.taskId ||
+      current.reviewHash !== state.reviewHash
+    )
+      throw new Error('INPUT_CHANGED');
+    // Recheck authorization after async validation, before releasing any candidate text.
+    if (!host.catalog.getBinding(state.bindingId)?.active)
+      throw new Error('BINDING_REVOKED');
     return {
-      taskId: state.task!.taskId,
+      taskId: state.task.taskId,
       reviewHash: state.reviewHash,
-      markdown: readLocalText(
-        resolve(this.config.dataRoot, 'plugin-state/session-memory/review.md'),
-        8_388_608,
-      ),
+      markdown,
     };
   }
+
   async execute(
     command: MemoryCommand,
     argument: MemoryArgument | undefined,
@@ -196,20 +225,6 @@ export class SessionMemoryService {
         )
           throw new Error('IMPORT_CONFLICT');
       }
-    }
-    if (
-      command === 'approve' &&
-      typeof argument === 'object' &&
-      state?.status === 'published' &&
-      state.task?.taskId === argument.taskId &&
-      state.reviewHash === argument.reviewHash
-    ) {
-      if (
-        host.catalog.getBinding(state.bindingId)!.sourceVersion !==
-        state.taskVersion
-      )
-        throw new Error('INPUT_CHANGED');
-      return this.inspect(host.catalog);
     }
     this.activeKey = key;
     this.active = sessionMemory(

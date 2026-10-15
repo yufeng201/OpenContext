@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 const evidence =
   process.env['OPENCONTEXT_UI_EVIDENCE'] ?? '/tmp/opencontext-memory-ui';
@@ -323,3 +323,44 @@ for (const leave of ['navigate', 'logout'] as const) {
     ).toBe('review');
   });
 }
+
+test('a damaged review is hidden and cannot be approved; restoring the exact file requires fresh confirmation', async ({
+  page,
+}) => {
+  const f = await fixture();
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await login(page, f);
+  await submit(page, f);
+  await expect(page.getByTestId('memory-review')).toContainText(
+    'cedar-browser-needle',
+  );
+  await confirm(page).check();
+  const path = f.root + '/data/plugin-state/session-memory/review.md';
+  const preview = readFileSync(path, 'utf8');
+  try {
+    writeFileSync(path, '# Forged synthetic browser preview');
+    await expect(page.getByTestId('memory-review')).toHaveCount(0, {
+      timeout: 15000,
+    });
+    await expect(page.getByText(/INPUT_CHANGED/)).toBeVisible();
+    await expect(approve(page)).toHaveCount(0);
+    await expect(
+      page.getByText('Forged synthetic browser preview', { exact: true }),
+    ).toHaveCount(0);
+    mkdirSync(evidence, { recursive: true });
+    await page.screenshot({
+      path: evidence + '/damaged-review.png',
+      fullPage: false,
+    });
+  } finally {
+    writeFileSync(path, preview);
+  }
+  await expect(page.getByTestId('memory-review')).toContainText(
+    'cedar-browser-needle',
+    { timeout: 15000 },
+  );
+  await expect(confirm(page)).not.toBeChecked();
+  await expect(approve(page)).toBeDisabled();
+  expect(errors).toEqual([]);
+});

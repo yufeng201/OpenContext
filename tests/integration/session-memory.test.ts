@@ -394,13 +394,13 @@ it('repairs both task and schema after actual process interruption during handof
   expect(existsSync(resolve(f.stateRoot, 'response-schema.json'))).toBe(true);
 });
 
-it('reconciles a committed publication after actual process exit before the cursor save', async () => {
+it('retries approval directly after actual process exit before the committed publication cursor save', async () => {
   const f = fixture();
   const first = await sessionMemory(f.config, 'sync');
   const review = await sessionMemory(f.config, 'submit', f.respond());
   const crashed = interrupted(f, 'approve', 'cursor', review.reviewHash!);
   expect(crashed.status, crashed.stderr).toBe(92);
-  const resumed = await sessionMemory(f.config, 'status');
+  const resumed = await sessionMemory(f.config, 'approve', review.reviewHash!);
   expect(resumed.status).toBe('published');
   expect(resumed.processedVersion).toBe(first.sourceVersion);
   expect((await sessionMemory(f.config, 'sync')).taskId).toBe(first.taskId);

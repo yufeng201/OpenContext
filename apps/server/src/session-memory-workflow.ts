@@ -162,13 +162,37 @@ function atomicText(path: string, text: string): void {
 function atomic(path: string, value: unknown): void {
   atomicText(path, JSON.stringify(value, null, 2) + '\n');
 }
-function preview(output: ProcessorOutput): string {
+export function memoryPreview(output: ProcessorOutput): string {
   return (
     `# Local Agent publication review\n\nReview SHA-256: ${agentHash(output)}\n\n${output.outputs.length} candidates. Approval replaces the prior generated set for this binding; an empty set removes prior generated candidates. This does not install or approve system rules.\n\n` +
     output.outputs
       .map((item) => `---\n\nFile: ${item.relativePath}\n\n${item.content}`)
       .join('\n')
   );
+}
+
+export function memoryInput(
+  state: Pick<State, 'projectId' | 'bindingId'>,
+  catalog: Catalog,
+  store: FileStore,
+): ProcessorInput {
+  const head = catalog.head(state.projectId);
+  if (!head) throw new Error('NO_FORMAL_INPUT');
+  return {
+    projectId: state.projectId,
+    bindingId: state.bindingId,
+    inputCommitId: head,
+    files: catalog
+      .currentFiles(state.projectId)
+      .filter(
+        (f) =>
+          f.bindingId === state.bindingId &&
+          f.collection === 'sources' &&
+          !f.tombstone &&
+          f.freshness === 'fresh',
+      )
+      .map((file) => ({ file, text: store.readText(file.contentHash) })),
+  };
 }
 
 /** Offline filesystem-operator authority, like admin.ts. Never accepts reader credentials. */
@@ -178,7 +202,18 @@ export async function sessionMemory(
   argument?: MemoryArgument,
   signal = new AbortController().signal,
   host?: MemoryHost,
-) {
+): Promise<{
+  status: State['status'] | 'disabled';
+  projectId?: string;
+  bindingId?: string;
+  sourceVersion?: string | null;
+  processedVersion?: string | null;
+  taskId?: string | null;
+  taskPath?: string;
+  previewPath?: string;
+  reviewHash?: string | null;
+  error?: string | null;
+}> {
   if (!Value.Check(SessionMemoryConfigSchema, config))
     throw new Error('INVALID_CONFIG');
   if (!config.enabled) return { status: 'disabled' };
@@ -312,25 +347,7 @@ export async function sessionMemory(
         throw new Error('BINDING_REVOKED');
       const save = () => atomic(statePath, state);
       const context = { signal, workDir: stateRoot };
-      const input = (): ProcessorInput => {
-        const head = catalog.head(state.projectId);
-        if (!head) throw new Error('NO_FORMAL_INPUT');
-        return {
-          projectId: state.projectId,
-          bindingId: state.bindingId,
-          inputCommitId: head,
-          files: catalog
-            .currentFiles(state.projectId)
-            .filter(
-              (f) =>
-                f.bindingId === state.bindingId &&
-                f.collection === 'sources' &&
-                !f.tombstone &&
-                f.freshness === 'fresh',
-            )
-            .map((file) => ({ file, text: store.readText(file.contentHash) })),
-        };
-      };
+      const input = () => memoryInput(state, catalog, store);
       const prepare = async () => {
         state.task = await createAgentTask(input(), context);
         state.taskVersion = catalog.getBinding(state.bindingId)!.sourceVersion;
@@ -370,6 +387,32 @@ export async function sessionMemory(
         argument.taskId !== state.task?.taskId
       )
         throw new Error('INPUT_CHANGED');
+      const result = () => ({
+        status: state.status,
+        projectId: state.projectId,
+        bindingId: state.bindingId,
+        sourceVersion: catalog.getBinding(state.bindingId)!.sourceVersion,
+        processedVersion: state.processedVersion,
+        taskId: state.task?.taskId ?? null,
+        taskPath,
+        previewPath,
+        reviewHash: state.reviewHash,
+        error: state.error,
+      });
+      // Reconcile first, then recognize the durable publication on the very first retry.
+      if (command === 'approve' && state.status === 'published') {
+        const requestedHash =
+          typeof argument === 'string' ? argument : argument?.reviewHash;
+        if (!state.task || !requestedHash || requestedHash !== state.reviewHash)
+          throw new Error('POLICY_DENIED');
+        if (
+          catalog.getBinding(state.bindingId)!.sourceVersion !==
+          state.taskVersion
+        )
+          throw new Error('INPUT_CHANGED');
+        return result();
+      }
+      const priorResponse = state.status === 'review' ? state.response : null;
       try {
         if (command === 'sync' || command === 'upload') {
           if (command === 'upload') {
@@ -448,7 +491,7 @@ export async function sessionMemory(
           state.reviewHash = agentHash(output);
           state.status = 'review';
           state.error = null;
-          atomicText(previewPath, preview(output));
+          atomicText(previewPath, memoryPreview(output));
           save();
         } else if (command === 'approve') {
           const requestedHash =
@@ -469,7 +512,7 @@ export async function sessionMemory(
           );
           if (
             agentHash(output) !== requestedHash ||
-            readLocalText(previewPath, 8_388_608) !== preview(output)
+            readLocalText(previewPath, 8_388_608) !== memoryPreview(output)
           )
             throw new Error('INPUT_CHANGED');
           approval = {
@@ -497,7 +540,38 @@ export async function sessionMemory(
         }
       } catch (error) {
         // Refused approval/cancel actions do not destroy a valid outstanding review.
-        if (!(error instanceof Error && error.message === 'POLICY_DENIED')) {
+        // A malformed replacement is not permission to erase an already valid review.
+        // Revalidate the previous response so actual source changes still fail closed.
+        let refusedReplacement = false;
+        if (
+          command === 'submit' &&
+          priorResponse !== null &&
+          state.response === priorResponse &&
+          state.status === 'review' &&
+          state.task &&
+          state.response &&
+          !signal.aborted
+        ) {
+          try {
+            const priorInput = input();
+            const previous = await reviewAgentResponse(
+              state.task,
+              priorInput,
+              state.response,
+              context,
+            );
+            refusedReplacement =
+              catalog.head(state.projectId) === priorInput.inputCommitId &&
+              agentHash(previous) === state.reviewHash &&
+              readLocalText(previewPath, 8_388_608) === memoryPreview(previous);
+          } catch {
+            /* The previous review is no longer safe to retain. */
+          }
+        }
+        if (
+          !refusedReplacement &&
+          !(error instanceof Error && error.message === 'POLICY_DENIED')
+        ) {
           if (
             state.status === 'publishing' &&
             state.runId &&
@@ -518,18 +592,7 @@ export async function sessionMemory(
         }
         throw error;
       }
-      return {
-        status: state.status,
-        projectId: state.projectId,
-        bindingId: state.bindingId,
-        sourceVersion: catalog.getBinding(state.bindingId)!.sourceVersion,
-        processedVersion: state.processedVersion,
-        taskId: state.task?.taskId ?? null,
-        taskPath,
-        previewPath,
-        reviewHash: state.reviewHash,
-        error: state.error,
-      };
+      return result();
     } finally {
       signal.removeEventListener('abort', abort);
     }

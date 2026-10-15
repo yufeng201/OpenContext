@@ -736,7 +736,9 @@ export function createApplication(options: ApplicationOptions) {
         const bindingId = memory.inspect(catalog).bindingId;
         if (bindingId && !catalog.getBinding(bindingId)?.active)
           throw new Error('BINDING_REVOKED');
-        return resource === 'task' ? memory.handoff() : memory.review();
+        return resource === 'task'
+          ? memory.handoff()
+          : memory.review({ catalog, store });
       },
     );
   }

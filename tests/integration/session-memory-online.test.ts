@@ -398,3 +398,214 @@ it('currently unsupported JSONL, truncated lines and unknown export formats neve
     f.application.catalog.getBinding(first.bindingId!)?.sourceVersion,
   ).toBe(first.sourceVersion);
 });
+
+it('retries approval immediately after a committed publication checkpoint gap without a status read', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const reviewed = (await f.post('submit', await f.response())).json();
+  const approval = { taskId: first.taskId, reviewHash: reviewed.reviewHash };
+  expect((await f.post('approve', approval)).statusCode).toBe(200);
+  const head = f.application.catalog.head(first.projectId!);
+  const path = resolve(f.dataRoot, 'plugin-state/session-memory/state.json');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  // Persist the exact pre-cursor crash state while retaining the committed host run.
+  state.status = 'publishing';
+  state.processedVersion = null;
+  writeFileSync(path, JSON.stringify(state));
+  await f.restart();
+  const result = await f.post('approve', approval);
+  expect(result.statusCode, result.body).toBe(200);
+  expect(result.json()).toMatchObject({
+    status: 'published',
+    processedVersion: state.taskVersion,
+  });
+  expect(f.application.catalog.head(first.projectId!)).toBe(head);
+});
+
+it('never serves a modified review file as the approved hash preview', async () => {
+  const f = fixture();
+  await f.sync();
+  await f.post('submit', await f.response());
+  const path = resolve(f.dataRoot, 'plugin-state/session-memory/review.md');
+  const originalPreview = readFileSync(path, 'utf8');
+  writeFileSync(path, '# Forged synthetic preview');
+  const result = await f.get('/review');
+  expect(result.statusCode).toBe(409);
+  expect(result.body).not.toContain('Forged synthetic preview');
+  // A read failure does not discard a valid response; restoring the exact file recovers.
+  writeFileSync(path, originalPreview);
+  expect((await f.get('/review')).statusCode).toBe(200);
+});
+
+it('a rejected replacement response preserves the last valid review and approval', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const response = await f.response();
+  const reviewed = (await f.post('submit', response)).json();
+  const preview = (await f.get('/review')).json();
+  for (const patch of [
+    { fileId: 'synthetic-unrelated-file' },
+    { line: 999999 },
+    { markdown: '   ' },
+  ]) {
+    const invalid = structuredClone(response);
+    Object.assign(invalid.candidates[0]!, patch);
+    const rejected = await f.post('submit', invalid);
+    expect(rejected.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await f.get()).json()).toMatchObject({
+      status: 'review',
+      reviewHash: reviewed.reviewHash,
+    });
+    expect((await f.get('/review')).json()).toEqual(preview);
+  }
+  const wrongHash = await f.post('submit', {
+    ...response,
+    inputHash: '0'.repeat(64),
+  });
+  expect(wrongHash.statusCode).toBe(409);
+  expect((await f.get('/review')).json()).toEqual(preview);
+  expect(
+    (
+      await f.post('approve', {
+        taskId: first.taskId,
+        reviewHash: reviewed.reviewHash,
+      })
+    ).statusCode,
+  ).toBe(200);
+});
+
+it('stale sources cannot be served as a current review or retained after a rejected replacement', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const response = await f.response();
+  await f.post('submit', response);
+  const changed = JSON.parse(original);
+  changed.payload.thread.turns[0].items[1].text =
+    'Synthetic source update outside the memory control flow';
+  writeFileSync(resolve(f.directory, 'selected.json'), JSON.stringify(changed));
+  const run = f.application.catalog.enqueue(first.bindingId!, 'sync');
+  await f.application.coordinator.drain();
+  expect(f.application.catalog.getRun(run.id)?.state).toBe('published');
+  const stale = await f.get('/review');
+  expect(stale.statusCode).toBe(409);
+  expect(stale.body).not.toContain('cedar-lighthouse');
+  expect((await f.post('submit', response)).statusCode).toBe(409);
+  expect((await f.get()).json().status).toBe('failed');
+  expect((await f.post('retry', { taskId: first.taskId })).json().status).toBe(
+    'pending',
+  );
+});
+
+it('recovered publication is readable through loopback CLI/MCP only in the authorized project', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const review = (await f.post('submit', await f.response())).json();
+  const approval = { taskId: first.taskId, reviewHash: review.reviewHash };
+  expect((await f.post('approve', approval)).statusCode).toBe(200);
+  const head = f.application.catalog.head(first.projectId!);
+  const reader = f.application.catalog.createReaderToken(first.projectId!);
+  const other = f.application.catalog.createProject(
+    'Synthetic unrelated project',
+  );
+  const outsider = f.application.catalog.createReaderToken(other.id);
+  const statePath = resolve(
+    f.dataRoot,
+    'plugin-state/session-memory/state.json',
+  );
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(
+    statePath,
+    JSON.stringify({ ...state, status: 'publishing', processedVersion: null }),
+  );
+  await f.restart();
+  const origin = await f.application.app.listen({ host: '127.0.0.1', port: 0 });
+  const run = promisify(execFile);
+  const cli = async (script: string, token: string, ...args: string[]) =>
+    JSON.parse(
+      (
+        await run(process.execPath, ['scripts/' + script, ...args], {
+          cwd: resolve(import.meta.dirname, '../..'),
+          timeout: 15000,
+          maxBuffer: 1048576,
+          env: {
+            PATH: process.env['PATH'] ?? '',
+            OPENCONTEXT_URL: origin,
+            OPENCONTEXT_OWNER_TOKEN: token,
+            OPENCONTEXT_QUERY_TOKEN: token,
+          },
+        })
+      ).stdout,
+    );
+  expect(
+    (
+      await cli(
+        'session-memory-online.ts',
+        owner,
+        'approve',
+        first.taskId!,
+        review.reviewHash,
+      )
+    ).status,
+  ).toBe('published');
+  expect(f.application.catalog.head(first.projectId!)).toBe(head);
+  const hits = (
+    await cli(
+      'opencontext.ts',
+      reader.token,
+      'search',
+      first.projectId!,
+      'cedar-lighthouse',
+    )
+  ).hits;
+  expect(hits).toHaveLength(1);
+  const file = hits[0].file;
+  const read = async (token: string) => {
+    const response = await fetch(new URL('/mcp', origin), {
+      method: 'POST',
+      signal: AbortSignal.timeout(10000),
+      headers: {
+        authorization: 'Bearer ' + token,
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2025-11-25',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'context_read',
+          arguments: {
+            projectId: first.projectId,
+            fileId: file.fileId,
+            revisionId: file.revisionId,
+            section: 'Content',
+            maxBytes: 256,
+          },
+        },
+      }),
+    });
+    return { status: response.status, text: await response.text() };
+  };
+  const allowed = await read(reader.token);
+  expect(allowed.status).toBe(200);
+  const content = JSON.parse(allowed.text).result.structuredContent;
+  expect(content.text).toContain('cedar-lighthouse');
+  expect(content.citation.revisionId).toBe(file.revisionId);
+  expect(Buffer.byteLength(content.text)).toBeLessThanOrEqual(256);
+  const denied = await read(outsider.token);
+  expect(denied.text).not.toContain('cedar-lighthouse');
+  expect(denied.text).toContain('FORBIDDEN');
+  await expect(
+    cli(
+      'opencontext.ts',
+      outsider.token,
+      'search',
+      first.projectId!,
+      'cedar-lighthouse',
+    ),
+  ).rejects.toThrow();
+  f.application.catalog.revokeBinding(first.bindingId!);
+  const revoked = await read(reader.token);
+  expect(revoked.text).not.toContain('cedar-lighthouse');
+});
