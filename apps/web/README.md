@@ -39,3 +39,10 @@ RHF 使用 contracts 的 TypeBox schema，通过 Ajv 校验；token 不进 URL/l
 
 
 个人记忆专项浏览器回归使用自建临时 fixture，无需上述外部服务变量：先 `pnpm build`，再 `OPENCONTEXT_BROWSER_BINARY=/usr/bin/chromium pnpm --filter @opencontext/web test:browser session-memory.spec.ts`。每个测试启动临时 loopback 真 API，使用合成会话和 Node fake worker，不调用真实 Codex。覆盖 owner/reader、未启用、来源失败恢复、候选变更、固定来源阅读、明确批准/拒绝/重试、重复点击及离页/退出时预检取消。桌面和窄屏截图默认写入 `/tmp/opencontext-memory-ui`，可用 `OPENCONTEXT_UI_EVIDENCE` 指定证据目录。初始未登录 `/api/session` 的预期 401 单独识别，其他控制台 warning/error 和运行时错误导致用例失败。
+
+
+## 一键完整合成验收
+
+从仓库根运行 `OPENCONTEXT_BROWSER_BINARY=/usr/bin/chromium pnpm test:browser:acceptance`（浏览器路径按本机已安装版本调整）。命令先构建 Web，再创建临时合成 Git 仓库、合成 owner、带模拟飞书的真实 loopback 服务，运行全部 25 项 Playwright 用例。无需真实 Git/飞书账号、用户 token 或模型。它不会自动下载浏览器；未准备浏览器时失败，不静默跳过。
+
+脚本仅向子进程传递 PATH、合成测试配置及显式浏览器/截图路径，临时服务自动选择端口，结束清理本次数据。执行期限为五分钟，超时或中断先停止测试进程，Linux 上对本次子进程组做有界终止；没有更改用户 Agent 配置。Windows 未验收。个人记忆截图可用 OPENCONTEXT_UI_EVIDENCE 指定目录，其余套件的截图目录见各 spec；不把截图、运行数据或临时 token 提交 Git。

@@ -42,7 +42,8 @@
     "demo:session-upload": "vitest run tests/integration/session-upload.test.ts -t DEMO",
     "session-memory:worker": "node scripts/session-memory-worker.ts",
     "demo:session-worker": "vitest run tests/integration/local-agent-worker.test.ts -t DEMO",
-    "demo:session-complex": "vitest run tests/integration/session-complex.test.ts -t DEMO"
+    "demo:session-complex": "vitest run tests/integration/session-complex.test.ts -t DEMO",
+    "test:browser:acceptance": "pnpm build && node scripts/browser-acceptance.ts"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",
