@@ -1,6 +1,7 @@
 // Static composition root: adding an approved package changes this list, not
 // HTTP routes, SQL persistence, or the task coordinator.
 import { StaticRegistry } from '@opencontext/plugin-host';
+import type { PluginDefinition } from '@opencontext/plugin-sdk';
 import { repoDefinition } from '@opencontext/repo-connector';
 import { markdownDefinition } from '@opencontext/markdown-processor';
 import {
@@ -24,6 +25,7 @@ import type {
 export function createDefaultRegistry(
   dataRoot: string,
   feishu?: Omit<FeishuChatOptions, 'stateRoot'>,
+  extra: PluginDefinition[] = [],
 ): StaticRegistry {
   return new StaticRegistry([
     repoDefinition,
@@ -37,6 +39,7 @@ export function createDefaultRegistry(
       ...feishu,
     }),
     feishuChatAnalysisDefinition,
+    ...extra,
   ]);
 }
 

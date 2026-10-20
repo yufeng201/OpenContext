@@ -1,4 +1,5 @@
 import { noLinks } from '../packages/state-sqlite/src/maintenance.ts';
+import { installationEnvironment } from './install-environment.ts';
 /** Fresh source copy, frozen install and synthetic private start/upgrade drill. */
 import {
   mkdtempSync,
@@ -153,7 +154,12 @@ try {
   console.log(
     'Stage: fresh frozen install; no copied node_modules or dependency cache',
   );
-  successful('pnpm', ['install', '--frozen-lockfile', '--ignore-scripts']);
+  successful(
+    'pnpm',
+    ['install', '--frozen-lockfile', '--ignore-scripts'],
+    checkout,
+    installationEnvironment(env, process.env),
+  );
   assert.equal(sha(join(checkout, 'pnpm-lock.yaml')), lockBefore);
   console.log('Stage: fresh build and deployment preflight');
   successful('pnpm', ['build']);

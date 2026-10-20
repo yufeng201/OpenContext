@@ -20,6 +20,8 @@ Web 开发热更新为 `pnpm dev:web`（127.0.0.1:5173），API/MCP代理到4310
 
 ## 已实现边界
 
+2026-10-09 增量：新增[个人 session 记忆文件交接](SESSION_MEMORY.md)。在线 owner 控制 API/CLI 复用服务器唯一写者，不停服完成显式目录同步、任务交接、审核与发布；默认关闭且目录只能由服务器本地配置，不能通过通用 binding API 选择目录插件。兼容离线入口仍要求停服。候选固定来源、人工审核哈希、去重和断点保持一致。仅有合成 worker 测试，不启动模型或修改 Agent 配置；原生 JSONL 后续增量与限定范围见[适配说明](SESSION_JSONL_ASSESSMENT.md)。
+
 | 模块        | 已有代码与行为                                                                                                                                     |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | server/权限 | owner bearer或HttpOnly/SameSite cookie，项目只读token及撤销；API/MCP每次检查当前项目授权，source撤销传播衍生内容                                   |
@@ -107,3 +109,21 @@ harness-only ZIP 是开始业务开发前的独立检查点，包含当时39个�
 官方Session候选仍为Markdown，新增Status/Provenance/Content章节；原始JSON及固定lineage保持。REST/SDK/CLI/MCP支持可选确定性标题目录、行/章节、UTF-8字节预算与offset续读；旧客户端无新参数时保留全文形状。Reader默认8KiB并提供目录、展开、续读和显式全文；空空间新增来源入口及导入错误恢复已补齐，预览支持两种安全代码围栏。存储在分配正文缓冲前对元数据和实际fd大小执行16MiB门禁，正文仍需上限内全文校验和扫描。
 
 参数及准确未实现项见[渐进披露](PROGRESSIVE_CONTEXT.md)。这轮只使用隔离合成Git/Session，未运行真实客户端登录、模型调用或飞书采集，不创建真实访问凭据，不改现有演示服务。验收材料以固定本地提交和独立交接为准；历史测试结果不冒称本轮执行。
+
+原生 Codex JSONL 已提供显式开启的 0.159.2/0.161.0 legacy 文本 profiles，经插件转为 v1、保留原始前缀/hash/解析器凭据，并复用在线单写者审核发布。只使用公开固定版本结构与合成 fixture；支持边界及截断策略见 [JSONL 适配](SESSION_JSONL_ASSESSMENT.md)，不代表真实 Codex 或模型验收。
+
+显式客户端一次性上传已实现：owner-only 控制面接收元数据最小化文本投影，uploadId/hash 联合 CAS、防重放覆盖、单次网络重试及取消语义；服务器保持唯一写者。合成 client/server 两目录通过 loopback CLI→模拟 worker→审核→CLI/MCP 回归，不是实际 Mac 多机器或真实模型验收，见 [session 操作指南](SESSION_MEMORY.md)。
+
+显式本地 Agent worker 已实现软件适配：固定 Codex 0.161.0 参数、默认不执行、独立临时目录与环境白名单、schema/hash 校验、有界进程组超时/取消及最多三次手动尝试。持 owner 的 sender 与 worker 分开，仍需人工审核发布。当前只以 fake 可执行程序和合成 loopback 服务验证；独立复核发现的取消/完成竞态与退出码残留已补修复及回归。真实 Codex、专用认证、模型提炼质量与运行时沙箱未验收，不自动启用或改用户配置，见 [操作与边界](SESSION_MEMORY.md)。
+
+2026-10-11：0.161.0 原生 JSONL 新增 archive-v2。配对 function/custom 文本工具分别成为 tool 证据；有限 compacted.message 成为 summary，保存观察前缀而不重放替换历史。上传改为对应 archive-projection/v2，服务器重验配对，候选核验原始行/配对/摘要前缀 hash。独立审查发现的嵌套系统文本投影与伪造 evidence 声明已补修复和回归。确定性标记不提取 tool/summary；显式 fake executor 及人工审核链路已运行。0.159.2 仍为文本 profile，高级压缩/多媒体/继承历史及真实用户 session 未验收，完整范围见 [JSONL 说明](SESSION_JSONL_ASSESSMENT.md)。
+
+### 个人记忆管理入口
+
+已在现有管理界面补充 owner 专属「个人记忆」导航，复用现有文件目录和 Session Memory API；不新增记忆表、导入格式或模型执行方式。支持来源/任务状态、完整候选审核、固定版本来源、hash 固定批准、明确取消及失败重试；本地上传与 worker 执行仍由 CLI 显式完成。运行验证使用合成数据、临时目录、loopback 真 API 和 fake executor；不代表真实模型执行、真实凭据或生产部署验收。浏览器复现入口见 [Web README](../apps/web/README.md)，操作语义见 [Session Memory](SESSION_MEMORY.md)。
+
+### 审核与恢复补强（2026-10-15）
+
+基于 `60531b0` 的本地增量：修复发布提交后 checkpoint 中断时首次批准重试误报失败、审核预览正文未验证、无效替换候选丢弃有效审核三项问题。审核读取复用固定来源与候选核验；发布恢复统一在线/离线逻辑，未增加存储服务或凭据。新增回归包含实际子进程退出、重启 checkpoint 恢复、loopback CLI 批准和搜索、MCP 固定版本有界读取、跨空间 reader 拒绝及来源撤销；浏览器覆盖损坏预览隐藏与恢复后重新确认。均为合成数据与 fake worker，未新增真实账号或模型验证，生产边界沿用各专项说明。
+
+独立复核补充：无效替换候选的旧审核保留路径在异步复核后重新检查来源 active、所属空间和 sourceVersion；撤销不改变 head，不能只依赖 head 比较。确定性微任务竞态已复现并加入回归；并发批准/重试与发布 checkpoint 缺口后的撤销恢复也有专门测试。撤销后的 API 门禁此前仍拒绝，修复的是磁盘审核状态误保留，不宣称发现或修复了已证实的数据泄漏。

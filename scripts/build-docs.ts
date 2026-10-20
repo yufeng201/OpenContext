@@ -8,6 +8,8 @@ const pages = [
   ['concepts', '核心概念', 'CORE_CONCEPTS.md'],
   ['query-access', 'REST / SDK / CLI / MCP', 'QUERY_ACCESS.md'],
   ['session', 'Session 接入', 'SESSION_IMPORT.md'],
+  ['session-memory', '个人 session 记忆', 'SESSION_MEMORY.md'],
+  ['session-jsonl', 'Codex JSONL 适配边界', 'SESSION_JSONL_ASSESSMENT.md'],
   ['progressive-context', 'Markdown 与渐进披露', 'PROGRESSIVE_CONTEXT.md'],
   ['feishu', '飞书支持等级', 'FEISHU_CHAT.md'],
   ['plugins', '插件开发', 'PLUGIN_DEVELOPMENT.md'],

@@ -125,11 +125,17 @@ function verifyRawProvenance(
             ? 'user'
             : item['type'] === 'agentMessage'
               ? 'assistant'
-              : null;
+              : item['type'] === 'opencontextEvidence'
+                ? item['role']
+                : null;
         if (role !== message.role) invalidProvenance();
         const nativeText =
           role === 'user' ? citedText(item['content'], 'codex') : item['text'];
-        if (nativeText !== message.text) invalidProvenance();
+        if (
+          nativeText !== message.text ||
+          JSON.stringify(item['evidence']) !== JSON.stringify(message.evidence)
+        )
+          invalidProvenance();
         matches += 1;
       }
     }
@@ -155,6 +161,75 @@ function verifyRawProvenance(
   if (matches === 0) invalidProvenance();
 }
 
+/** Verify declared archive coordinates without implementing rollout replay a second time. */
+function verifyEvidence(
+  nativeText: string,
+  message: NormalizedSessionMessage,
+): void {
+  const evidence = message.evidence;
+  if (!evidence || message.provider !== 'codex') invalidProvenance();
+  const lines = nativeText.split('\n');
+  const readLine = (line: number, hash: string) => {
+    const text = lines[line - 1];
+    if (
+      text === undefined ||
+      line >= lines.length ||
+      sha256(text + '\n') !== hash
+    )
+      invalidProvenance();
+    return record(JSON.parse(text));
+  };
+  const source = readLine(evidence.sourceLine, evidence.sourceHash);
+  const payload = record(source['payload']);
+  if (evidence.kind === 'message') {
+    if (
+      !['user', 'assistant'].includes(message.role) ||
+      source['type'] !== 'response_item' ||
+      payload['type'] !== 'message' ||
+      payload['role'] !== message.role
+    )
+      invalidProvenance();
+  } else if (evidence.kind === 'compaction') {
+    if (
+      message.role !== 'summary' ||
+      source['type'] !== 'compacted' ||
+      evidence.coverage !==
+        'observed-prefix-only; exact-model-coverage-unknown' ||
+      evidence.observedThroughLine !== evidence.sourceLine - 1 ||
+      evidence.observedPrefixHash !==
+        sha256(lines.slice(0, evidence.sourceLine - 1).join('\n') + '\n')
+    )
+      invalidProvenance();
+  } else {
+    if (
+      message.role !== 'tool' ||
+      source['type'] !== 'response_item' ||
+      !evidence.callId ||
+      !evidence.pairedLine ||
+      !evidence.pairedHash ||
+      payload['call_id'] !== evidence.callId
+    )
+      invalidProvenance();
+    const pair = readLine(evidence.pairedLine, evidence.pairedHash);
+    const paired = record(pair['payload']);
+    if (
+      pair['type'] !== 'response_item' ||
+      paired['call_id'] !== evidence.callId
+    )
+      invalidProvenance();
+    const call = evidence.kind === 'tool_call' ? payload : paired;
+    const result = evidence.kind === 'tool_result' ? payload : paired;
+    if (
+      !['function_call', 'custom_tool_call'].includes(String(call['type'])) ||
+      result['type'] !== String(call['type']) + '_output' ||
+      (evidence.kind === 'tool_call'
+        ? evidence.pairedLine <= evidence.sourceLine
+        : evidence.pairedLine >= evidence.sourceLine)
+    )
+      invalidProvenance();
+  }
+}
+
 /** Extension point for future reviewed implementations, not an implemented model adapter. */
 export interface CandidateExtractor {
   method: 'deterministic' | 'local-agent' | 'provider';
@@ -167,6 +242,8 @@ export const explicitMarkerExtractor: CandidateExtractor = {
   method: 'deterministic',
   extract(message) {
     const candidates: Candidate[] = [];
+    if (message.role === 'tool' || message.role === 'summary')
+      return candidates;
     for (const [index, line] of message.text.split(/\r?\n/).entries()) {
       const match =
         /^\s*(Memory|Rule|Experience|记忆|规则|经验)\s*[:：]\s*(\S.*)$/iu.exec(
@@ -257,6 +334,82 @@ export async function extractCandidates(
         'INVALID_INPUT: A normalized message requires its fixed raw session source',
       );
     verifyRawProvenance(raw.text, message);
+    // The locked trusted connector attests the conversion; this processor verifies
+    // the hash-linked receipt, not an independent implementation of its parser.
+    const native = input.files.find(
+      (entry) =>
+        entry.file.logicalPath === rawPath.replace(/raw\.json$/, 'raw.jsonl'),
+    );
+    const receipt = input.files.find(
+      (entry) =>
+        entry.file.logicalPath ===
+        rawPath.replace(/raw\.json$/, 'transform.json'),
+    );
+    let nativeProvenance = '';
+    if (
+      (message.evidence ||
+        message.role === 'tool' ||
+        message.role === 'summary') &&
+      (!native || !receipt || !message.evidence)
+    )
+      invalidProvenance();
+    if (native || receipt) {
+      if (!native || !receipt) invalidProvenance();
+      const proof: unknown = JSON.parse(receipt.text);
+      const schema = Type.Object(
+        {
+          schema: Type.Literal('opencontext.session-transform/v1'),
+          parser: Type.Union([
+            Type.Literal('codex-rollout/0.159.2-legacy-text-v1'),
+            Type.Literal('codex-rollout/0.161.0-legacy-text-v1'),
+            Type.Literal('codex-rollout/0.161.0-archive-v2'),
+          ]),
+          transport: Type.Optional(
+            Type.Object(
+              {
+                profile: Type.Union([
+                  Type.Literal('text-projection/v1'),
+                  Type.Literal('archive-projection/v2'),
+                ]),
+                clientPrefixHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+                clientPrefixBytes: Type.Integer({
+                  minimum: 1,
+                  maximum: 1_048_576,
+                }),
+              },
+              { additionalProperties: false },
+            ),
+          ),
+          rawOnly: Type.Optional(
+            Type.Record(Type.String(), Type.Integer({ minimum: 1 })),
+          ),
+          originalHash: Type.String(),
+          originalBytes: Type.Integer({ minimum: 1 }),
+          canonicalHash: Type.String(),
+        },
+        { additionalProperties: false },
+      );
+      if (
+        !Value.Check(schema, proof) ||
+        proof.originalHash !== sha256(native.text) ||
+        proof.originalBytes !== Buffer.byteLength(native.text) ||
+        proof.canonicalHash !== sha256(raw.text)
+      )
+        invalidProvenance();
+      if (message.evidence) verifyEvidence(native.text, message);
+      nativeProvenance = `${proof.transport ? 'Uploaded projection (machine metadata omitted)' : 'Native JSONL completed prefix'}: [fixed original](oc://space/${uriPart(input.projectId)}/file/${uriPart(native.file.fileId)}@${uriPart(native.file.revisionId)})\n\n${proof.transport ? 'Uploaded projection SHA-256' : 'Original SHA-256'}: ${proof.originalHash}\n\nParser: ${proof.parser}\n\nTransformation receipt: [fixed receipt](oc://space/${uriPart(input.projectId)}/file/${uriPart(receipt.file.fileId)}@${uriPart(receipt.file.revisionId)})\n\n`;
+      if (proof.transport)
+        nativeProvenance += `Client original prefix SHA-256 (unverified declaration): ${proof.transport.clientPrefixHash}\n\nClient prefix bytes: ${proof.transport.clientPrefixBytes}\n\n`;
+    }
+    if (message.evidence)
+      nativeProvenance +=
+        `Evidence role: ${message.role} / ${message.evidence.kind}\n\nSource JSONL line: ${message.evidence.sourceLine}; line SHA-256: ${message.evidence.sourceHash}\n\n` +
+        ('pairedLine' in message.evidence
+          ? `Paired JSONL line: ${message.evidence.pairedLine}; SHA-256: ${message.evidence.pairedHash}\n\n`
+          : '') +
+        (message.evidence.kind === 'compaction'
+          ? `Compaction coverage: ${message.evidence.coverage}; observed through line ${message.evidence.observedThroughLine}; observed prefix SHA-256: ${message.evidence.observedPrefixHash}\n\n`
+          : '');
     const candidates = await extractor.extract(message, {
       signal: context.signal,
     });
@@ -307,6 +460,12 @@ export async function extractCandidates(
         derivedFrom: [
           { fileId: file.fileId, revisionId: file.revisionId },
           { fileId: raw!.file.fileId, revisionId: raw!.file.revisionId },
+          ...(native && receipt
+            ? [native, receipt].map((entry) => ({
+                fileId: entry.file.fileId,
+                revisionId: entry.file.revisionId,
+              }))
+            : []),
         ],
         content:
           `# ${candidate.kind} candidate\n\n## Status\n\nstatus: candidate\n\nmethod: ${extractor.method}\n\nconfidence: ${extractor.method === 'deterministic' ? 'exact explicit-marker match only' : 'unreviewed adapter proposal'}; semantic correctness is unverified\n\n` +
@@ -314,7 +473,8 @@ export async function extractCandidates(
           `## Provenance\n\nProvider: ${message.provider}\n\nSession ID: ${literal(message.sessionId)}\n\nMessage ID: ${literal(message.messageId)}\n\n` +
           (message.turnId ? `Turn ID: ${literal(message.turnId)}\n\n` : '') +
           `Evidence line: ${candidate.line}\n\nSource: [fixed source revision](${citation})\n\nSHA-256: ${file.contentHash}\n\n` +
-          `Original session: [fixed raw export](oc://space/${uriPart(input.projectId)}/file/${uriPart(raw!.file.fileId)}@${uriPart(raw!.file.revisionId)})\n\nRaw SHA-256: ${raw!.file.contentHash}\n\n` +
+          `${native ? 'Canonical converted session' : 'Original session'}: [fixed raw export](oc://space/${uriPart(input.projectId)}/file/${uriPart(raw!.file.fileId)}@${uriPart(raw!.file.revisionId)})\n\nRaw SHA-256: ${raw!.file.contentHash}\n\n` +
+          nativeProvenance +
           `## Content\n\n${fence}text\n${candidate.text}\n${fence}\n`,
       });
     }

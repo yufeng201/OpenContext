@@ -2,11 +2,14 @@
 
 本目录保留产品设计与实际开发说明。**第一次运行请从[快速开始](QUICKSTART.md)进入**；[实施状态](IMPLEMENTATION_STATUS.md)列出真实能力、验证层次和限制。当前是本机开发预览版，没有已发布 npm 包、Docker 镜像或生产部署包，不代表完整P1完成。
 
+- [2026-10-20 发布准备验收](RELEASE_ACCEPTANCE_20261020.md)：本轮版本、复现命令、协议/模拟边界与仍未验证项。
+
 ## 当前可运行入口
 
 - [仓库首页](../README.md)：定位、工具前提、最短启动和当前边界。
 - [快速开始](QUICKSTART.md)：Git→检索→固定引用→Markdown→MCP，含模式隔离、查询token和恢复步骤。
 - [Session 主动导入](SESSION_IMPORT.md)：用户选择导出文件，区别原文、归一化和确定性候选；不扫描电脑或启动模型。
+- [个人 session 记忆](SESSION_MEMORY.md)：默认关闭的选定导出目录、增量任务断点、本地 Agent 文件协议、显式审核发布及渐进召回。
 - [飞书群采集](FEISHU_CHAT.md)：限定群与时间范围、连接诊断、模拟/真实边界及归档恢复。
 - [插件开发](PLUGIN_DEVELOPMENT.md)：当前静态可信 connector/processor 注册与锁定机制，区别实际接口和八类目标。
 - [实施状态](IMPLEMENTATION_STATUS.md)：实现事实与未实现项；协议连通不等于模型自主调用通过。

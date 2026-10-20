@@ -35,6 +35,13 @@ export function auditEvent(
 }
 export function auditAction(route: string, method: string): string {
   if (route === '/mcp') return 'mcp.request';
+  if (route.startsWith('/api/session-memory'))
+    return (
+      'memory.' +
+      (route.split('/').at(-1) === 'session-memory'
+        ? 'status'
+        : route.split('/').at(-1))
+    );
   if (route === '/api/audit/retry') return 'audit.retry';
   if (route === '/api/audit/pending') return 'audit.pending.export';
   if (route === '/api/audit') return 'audit.export';

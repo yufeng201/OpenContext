@@ -25,6 +25,8 @@
     "start": "node apps/server/src/main.ts",
     "dev:web": "pnpm --filter @opencontext/web dev",
     "cli": "node scripts/opencontext.ts",
+    "session-memory": "node scripts/session-memory.ts",
+    "session-memory:online": "node scripts/session-memory-online.ts",
     "docs:build": "node scripts/build-docs.ts",
     "docs:preview": "node scripts/preview-docs.ts",
     "admin": "node scripts/admin.ts",
@@ -34,7 +36,14 @@
     "preflight": "node scripts/preflight.ts",
     "drill:deploy": "node scripts/deployment-drill.ts",
     "release:build": "pnpm build && node scripts/package-release.ts",
-    "release:archive": "node scripts/release-archive.ts"
+    "release:archive": "node scripts/release-archive.ts",
+    "demo:session-jsonl": "vitest run tests/integration/session-jsonl.test.ts -t DEMO",
+    "session-memory:upload": "node scripts/session-memory-upload.ts",
+    "demo:session-upload": "vitest run tests/integration/session-upload.test.ts -t DEMO",
+    "session-memory:worker": "node scripts/session-memory-worker.ts",
+    "demo:session-worker": "vitest run tests/integration/local-agent-worker.test.ts -t DEMO",
+    "demo:session-complex": "vitest run tests/integration/session-complex.test.ts -t DEMO",
+    "test:browser:acceptance": "pnpm build && node scripts/browser-acceptance.ts"
   },
   "devDependencies": {
     "@sinclair/typebox": "0.34.52",

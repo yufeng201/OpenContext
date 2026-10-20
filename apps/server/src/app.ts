@@ -64,6 +64,13 @@ import { Coordinator } from './coordinator.ts';
 import type { StaticRegistry } from '@opencontext/plugin-host';
 import type { FeishuChatOptions } from '@opencontext/feishu-chat';
 import { Type } from '@sinclair/typebox';
+import { SessionMemoryService } from './session-memory-service.ts';
+import { AgentResponseSchema } from '../../../plugins/session-candidates/src/local-agent.ts';
+import {
+  SessionMemoryTaskActionSchema,
+  SessionMemoryApprovalSchema,
+  SessionUploadRequestSchema,
+} from '../../../packages/contracts/src/session-memory.ts';
 import {
   createDefaultRegistry,
   bindingSelection,
@@ -85,6 +92,8 @@ export type ApplicationOptions = {
   registry?: StaticRegistry;
   /** Reviewed server-side dependency injection; never accepted by a client body. */
   feishu?: Omit<FeishuChatOptions, 'stateRoot'>;
+  /** Local operator configuration only. Never populated from HTTP request data. */
+  sessionMemory?: unknown;
 };
 export function createApplication(options: ApplicationOptions) {
   if (options.ownerToken.length < 32) throw new Error('OWNER_TOKEN_TOO_SHORT');
@@ -101,8 +110,22 @@ export function createApplication(options: ApplicationOptions) {
     (statSync(options.dataRoot).mode & 0o077) !== 0
   )
     throw new Error('ROOT_PERMISSIONS_UNSAFE');
+  const memory =
+    options.sessionMemory === undefined
+      ? undefined
+      : new SessionMemoryService(
+          options.sessionMemory,
+          options.dataRoot,
+          options.dataMode !== 'demo',
+        );
+  if (memory && options.registry) throw new Error('INVALID_CONFIG');
   const registry =
-    options.registry ?? createDefaultRegistry(options.dataRoot, options.feishu);
+    options.registry ??
+    createDefaultRegistry(
+      options.dataRoot,
+      options.feishu,
+      memory?.definitions,
+    );
   mkdirSync(options.dataRoot, { recursive: true, mode: 0o700 });
   const catalog = new Catalog(resolve(options.dataRoot, 'control.sqlite'), {
     mode: options.dataMode ?? 'private',
@@ -537,6 +560,7 @@ export function createApplication(options: ApplicationOptions) {
                       ? 401
                       : [
                             'FORBIDDEN',
+                            'POLICY_DENIED',
                             'UNTRUSTED_HOST',
                             'UNTRUSTED_ORIGIN',
                           ].includes(code)
@@ -688,6 +712,99 @@ export function createApplication(options: ApplicationOptions) {
     authorize(authenticate(request), undefined, true);
     return registry.list();
   });
+  const memoryGate = async (request: FastifyRequest) => {
+    authorize(authenticate(request), undefined, true);
+  };
+  app.get('/api/session-memory', { onRequest: memoryGate }, async () => {
+    if (!memory) return { enabled: false, active: false, status: 'disabled' };
+    // Reconcile committed runs after restart before returning idle status.
+    if (!memory.inspect().active && memory.inspect().projectId)
+      await memory.execute('status', undefined, {
+        catalog,
+        store,
+        registry,
+        coordinator,
+      });
+    return memory.inspect(catalog);
+  });
+  for (const resource of ['task', 'review'] as const) {
+    app.get(
+      '/api/session-memory/' + resource,
+      { onRequest: memoryGate },
+      () => {
+        if (!memory) throw new Error('NOT_FOUND');
+        const bindingId = memory.inspect(catalog).bindingId;
+        if (bindingId && !catalog.getBinding(bindingId)?.active)
+          throw new Error('BINDING_REVOKED');
+        return resource === 'task'
+          ? memory.handoff()
+          : memory.review({ catalog, store });
+      },
+    );
+  }
+  for (const command of [
+    'sync',
+    'upload',
+    'submit',
+    'approve',
+    'cancel',
+    'retry',
+  ] as const) {
+    const body =
+      command === 'upload'
+        ? SessionUploadRequestSchema
+        : command === 'submit'
+          ? AgentResponseSchema
+          : command === 'approve'
+            ? SessionMemoryApprovalSchema
+            : command === 'sync'
+              ? Type.Object({}, { additionalProperties: false })
+              : SessionMemoryTaskActionSchema;
+    app.post<{ Body: Record<string, unknown> }>(
+      '/api/session-memory/' + command,
+      {
+        onRequest: memoryGate,
+        bodyLimit:
+          command === 'upload'
+            ? 2_105_344
+            : command === 'submit'
+              ? 4_194_304
+              : 65_536,
+        schema: { body },
+      },
+      async (request) => {
+        if (!memory) throw new Error('POLICY_DENIED');
+        const principal = authenticate(request);
+        authorize(principal, undefined, true);
+        const result = await memory.execute(
+          command,
+          command === 'sync'
+            ? undefined
+            : command === 'submit'
+              ? {
+                  taskId: request.body['taskId'] as string,
+                  response: request.body,
+                }
+              : (request.body as { taskId: string; reviewHash?: string }),
+          {
+            catalog,
+            store,
+            registry,
+            coordinator,
+            audit: {
+              actor: { id: principal.id, role: principal.role },
+              requestId: request.id,
+            },
+          },
+        );
+        requestTargets.set(request, {
+          projectId: result.projectId,
+          bindingId: result.bindingId,
+        });
+        return result;
+      },
+    );
+  }
   app.get<{ Params: ProjectParams }>(
     '/api/projects/:id/bindings',
     (request) => {
@@ -713,6 +830,20 @@ export function createApplication(options: ApplicationOptions) {
       try {
         authorize(authenticate(request), request.params.id, true);
         const selection = bindingSelection(request.body);
+        if (
+          [selection.connector.packageRef, selection.processor.packageRef].some(
+            (ref) =>
+              [
+                'org.opencontext.session-directory@0.1.0',
+                'org.opencontext.session-jsonl-directory@0.1.0',
+                'org.opencontext.session-jsonl-directory-0161@0.1.0',
+                'org.opencontext.session-jsonl-upload@0.1.0',
+                'org.opencontext.session-jsonl-upload-0161@0.1.0',
+                'org.opencontext.reviewed-session-agent@0.1.0',
+              ].includes(ref),
+          )
+        )
+          throw new Error('POLICY_DENIED');
         const context = options.allowedLocalRepoRoot
           ? {
               allowedLocalRepoRoot: options.allowedLocalRepoRoot,
@@ -805,6 +936,12 @@ export function createApplication(options: ApplicationOptions) {
       const cancellation = requestCancellation(request, reply);
       try {
         const binding = bindingGate(request);
+        if (
+          binding.connector?.packageRef.startsWith(
+            'org.opencontext.session-jsonl-upload',
+          )
+        )
+          throw new Error('POLICY_DENIED');
         if (!binding.active) throw new Error('BINDING_REVOKED');
         if (
           !binding.connector ||
@@ -859,6 +996,12 @@ export function createApplication(options: ApplicationOptions) {
     '/api/projects/:id/bindings/:bindingId/imports/:objectId',
     (request) => {
       const binding = bindingGate(request);
+      if (
+        binding.connector?.packageRef.startsWith(
+          'org.opencontext.session-jsonl-upload',
+        )
+      )
+        throw new Error('POLICY_DENIED');
       critical(request, (context) =>
         catalog.removeImport(binding.id, request.params.objectId, context),
       );
@@ -1100,6 +1243,7 @@ export function createApplication(options: ApplicationOptions) {
   app.addHook('preClose', async () => {
     readAdmission.close();
     await coordinator.stop();
+    await memory?.settled();
   });
   app.addHook('onClose', async () => {
     await coordinator.stop();

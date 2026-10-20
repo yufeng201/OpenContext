@@ -115,6 +115,41 @@ export const FeishuChatMessageSchema = Type.Object(
 );
 export type FeishuChatMessage = Static<typeof FeishuChatMessageSchema>;
 
+const evidencePosition = {
+  sourceLine: Type.Integer({ minimum: 1, maximum: 10000 }),
+  sourceHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+};
+export const SessionEvidenceSchema = Type.Union([
+  Type.Object(
+    { ...evidencePosition, kind: Type.Literal('message') },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...evidencePosition,
+      kind: Type.Union([
+        Type.Literal('tool_call'),
+        Type.Literal('tool_result'),
+      ]),
+      callId: Type.String({ minLength: 1, maxLength: 200 }),
+      pairedLine: Type.Integer({ minimum: 1, maximum: 10000 }),
+      pairedHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      ...evidencePosition,
+      kind: Type.Literal('compaction'),
+      observedThroughLine: Type.Integer({ minimum: 1, maximum: 10000 }),
+      observedPrefixHash: Type.String({ pattern: '^[a-f0-9]{64}$' }),
+      coverage: Type.Literal(
+        'observed-prefix-only; exact-model-coverage-unknown',
+      ),
+    },
+    { additionalProperties: false },
+  ),
+]);
 export const SessionMessageSchema = Type.Object(
   {
     schema: Type.Literal('opencontext.session-message/v1'),
@@ -123,7 +158,13 @@ export const SessionMessageSchema = Type.Object(
     sessionId: Type.String({ minLength: 1, maxLength: 200 }),
     messageId: Type.String({ minLength: 1, maxLength: 200 }),
     turnId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
-    role: Type.Union([Type.Literal('user'), Type.Literal('assistant')]),
+    role: Type.Union([
+      Type.Literal('user'),
+      Type.Literal('assistant'),
+      Type.Literal('tool'),
+      Type.Literal('summary'),
+    ]),
+    evidence: Type.Optional(SessionEvidenceSchema),
     text: Type.String({ maxLength: 1_048_576 }),
   },
   { additionalProperties: false },
