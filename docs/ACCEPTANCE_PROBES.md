@@ -48,9 +48,9 @@ python3 scripts/probes/docker-acceptance.py "$PROBE_IMAGE" > "$PROBE_WORK/docker
 cat "$PROBE_WORK/docker-result.json"
 ```
 
-[驱动脚本](../scripts/probes/docker-acceptance.py)只接受本地不可变 `sha256:` ID，使用空 Docker 配置与 `--pull never`。容器无网络、无主机端口、只读根、cap-drop ALL、no-new-privileges，限制 768 MiB、1 CPU、128 pids，绑定自己的临时数据目录和合成 owner 文件。显式设置 loopback，未绕过 public-origin 门禁。
+[驱动脚本](../scripts/probes/docker-acceptance.py)只接受本地不可变 `sha256:` ID，固定使用 `--host unix:///var/run/docker.sock`、空 Docker 配置与 `--pull never`，子进程环境只保留 PATH；调用者的 DOCKER_HOST、DOCKER_CONTEXT、TLS/配置及代理变量不会传入。该 socket 不可用时失败，不回退到其他 daemon。容器无网络、无主机端口、只读根、cap-drop ALL、no-new-privileges，限制 768 MiB、1 CPU、128 pids，绑定自己的临时数据目录和合成 owner 文件。显式设置 loopback，未绕过 public-origin 门禁。
 
-[容器内探针](../scripts/probes/docker-runtime.mjs)通过 stdin 在镜像 `/opt/opencontext` 工作目录运行；它依赖镜像内 MCP SDK，不要直接以主机脚本路径运行。检查健康/匿名拒绝、reader 越权拒绝、合成会话两个版本、CLI 与真实 MCP SDK 搜索/固定历史读取、重启 head/hash 一致和正常停止。每次 Docker 操作最多 45 秒，HTTP 最多 5 秒，结束清理自己的容器和临时数据。结果须为 `passed` 且进程退出 0。
+[容器内探针](../scripts/probes/docker-runtime.mjs)通过 stdin 在镜像 `/opt/opencontext` 工作目录运行；它依赖镜像内 MCP SDK，不要直接以主机脚本路径运行。检查健康/匿名拒绝、reader 越权拒绝、合成会话两个版本、CLI 与真实 MCP SDK 搜索/固定历史读取、重启 head/hash 一致和正常停止。每次 Docker 操作最多 45 秒，HTTP 最多 5 秒，每次创建前生成唯一名称和运行 label，create 返回超时也执行清理：先按本次 label/名称查询，再核对完整 ID、名称和 label，最后仅按核验后的 ID 删除。没有匹配时不删除；归属不符或清理失败时报告失败，不扩大清理范围。结束清理自己的临时数据。结果须为 `passed` 且进程退出 0。
 
 构建 worktree、发布包和日志保留供审查。审查完成后用 `git worktree remove "$PROBE_WORK/source"` 移除本次 worktree，再自行删除本次创建的临时发布包；不要清理其他运行数据或镜像。
 
@@ -74,4 +74,4 @@ node --test tests/harness/probe-policy.test.ts
 pnpm check
 ```
 
-三个 harness 用例覆盖允许的显式读取、拒绝模型/登录/持久或高权限 thread/写工具，以及 Docker 本地 ID 正例与 tag 拒绝；它们不替代上述实际 Docker/Codex 运行。升级、未知 schema 拒绝、备份恢复另按验收报告中的 drill 执行。本探针不覆盖 Compose、TLS、系统服务、真实模型提炼质量或生产 SLO，不能据此宣称工业级。
+四个 harness 用例覆盖允许的显式读取、拒绝模型/登录/持久或高权限 thread/写工具，以及 Docker 本地 ID 正例与 tag 拒绝；新增离线故障 fixture 覆盖远端环境变量隔离、daemon 已创建但 CLI 超时、错误归属拒绝删除及没有容器时不删除。它们不替代上述实际 Docker/Codex 运行。升级、未知 schema 拒绝、备份恢复另按验收报告中的 drill 执行。本探针不覆盖 Compose、TLS、系统服务、真实模型提炼质量或生产 SLO，不能据此宣称工业级。

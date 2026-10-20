@@ -38,6 +38,8 @@ pnpm demo:session-complex
 
 用户的实际使用顺序仍是：[快速开始](QUICKSTART.md)建立空间和来源 → 同步文件 → 查看固定来源 → [个人记忆](SESSION_MEMORY.md)显式上传/worker 交接 → 在管理后台阅读候选并批准 → 通过[查询接入](QUERY_ACCESS.md)的只读 CLI/MCP 搜索并按[渐进披露](PROGRESSIVE_CONTEXT.md)读取固定 revision。网页不会读取 Mac 路径，未启用功能不会扫描会话，批准不会安装系统规则。
 
+Docker 探针后续稳健性修订强制本地 Unix socket 并过滤子进程环境；create 超时后按本次唯一 label、名称和完整 ID 验证归属再清理。针对性故障测试与本地容器实跑通过，完整检查为 520 应用测试、22 harness；未修改产品运行代码。
+
 ## 已遇问题与处理
 
 - Docker 构建环境的代理主机无法解析（`EAI_AGAIN`）：仅在此次构建传入当前环境解析出的 `--add-host`，使用已有 CA 的 BuildKit secret；未修改全局 DNS、证书或网络安全设置。修正后当前 Dockerfile 构建通过。

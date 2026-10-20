@@ -9,6 +9,37 @@ import tempfile
 import uuid
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
+LOCAL_DAEMON = "unix:///var/run/docker.sock"
+RUN_LABEL = "org.opencontext.acceptance-run"
+
+
+def docker_command(config):
+    # Explicit endpoint plus an allowlisted environment excludes DOCKER_HOST,
+    # DOCKER_CONTEXT, TLS/config overrides and proxy settings from the caller.
+    return ["docker", "--host", LOCAL_DAEMON, "--config", str(config)]
+
+
+def docker_environment():
+    return {"PATH": os.environ.get("PATH", os.defpath)}
+
+
+def cleanup_probe(run, name, run_id):
+    # A create response may time out after the daemon created the container.
+    # Discover only this run's label/name and delete by verified immutable ID.
+    ids = run(["container", "ls", "--all", "--quiet", "--no-trunc",
+               "--filter", "label=" + RUN_LABEL + "=" + run_id,
+               "--filter", "name=^/" + name + "$"]).split()
+    if len(ids) > 1:
+        raise RuntimeError("PROBE_CLEANUP_AMBIGUOUS")
+    for container_id in ids:
+        if not re.fullmatch(r"[a-f0-9]{64}", container_id):
+            raise RuntimeError("PROBE_CLEANUP_INVALID_ID")
+        metadata = json.loads(run(["container", "inspect", container_id]))
+        if (len(metadata) != 1 or metadata[0].get("Id") != container_id
+                or metadata[0].get("Name") != "/" + name
+                or (metadata[0].get("Config", {}).get("Labels") or {}).get(RUN_LABEL) != run_id):
+            raise RuntimeError("PROBE_CLEANUP_OWNERSHIP_MISMATCH")
+        run(["container", "rm", "--force", container_id])
 
 
 def validate_image(image):
@@ -23,16 +54,18 @@ def main():
     image = validate_image(sys.argv[1])
     if sys.platform != "linux" or os.getuid() != 1000:
         raise ValueError("LINUX_UID1000_REQUIRED: do not loosen data permissions")
-    name = "oc-acceptance-" + uuid.uuid4().hex
+    run_id = uuid.uuid4().hex
+    name = "oc-acceptance-" + run_id
     with tempfile.TemporaryDirectory(prefix="oc-docker-acceptance-") as temporary:
         root = pathlib.Path(temporary)
         config = root / "docker-config"
         config.mkdir()
         (config / "config.json").write_text("{}\n")
-        docker = ["docker", "--config", str(config)]
+        docker = docker_command(config)
+        environment = docker_environment()
 
         def run(args, data=None):
-            result = subprocess.run(docker + args, input=data, text=True, capture_output=True, timeout=45)
+            result = subprocess.run(docker + args, input=data, text=True, capture_output=True, timeout=45, env=environment)
             if result.returncode:
                 # Do not emit raw process output or environment values.
                 raise RuntimeError("DOCKER_PROBE_FAILED: " + args[0] + " exit=" + str(result.returncode))
@@ -46,17 +79,16 @@ def main():
         owner.chmod(0o600)
         script = (REPO / "scripts/probes/docker-runtime.mjs").read_text()
         fixture = (REPO / "plugins/session-connector/fixtures/codex-session.json").read_text()
-        created = False
         try:
-            # Create first, so cleanup is scoped even if starting the container fails.
+            # Cleanup is armed before create, including an uncertain CLI outcome.
             run(["create", "--pull", "never", "--name", name,
+                 "--label", RUN_LABEL + "=" + run_id,
                  "-e", "OPENCONTEXT_BIND_HOST=127.0.0.1", "--network", "none", "--read-only",
                  "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
                  "--memory", "768m", "--cpus", "1", "--pids-limit", "128",
                  "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m,mode=1777",
                  "--mount", f"type=bind,src={data},dst=/var/lib/opencontext",
                  "--mount", f"type=bind,src={owner},dst=/run/opencontext-owner,readonly", image])
-            created = True
             run(["start", name])
             first = json.loads(run(["exec", "-i", "-e", "SMOKE_FIXTURE=" + fixture, name,
                                     "node", "--input-type=module"], script))
@@ -75,8 +107,7 @@ def main():
                               "stopExitCodes": [exit1, exit2], "network": "none", "hostPorts": 0,
                               "scope": "Synthetic imported files, CLI, MCP SDK, permissions and restart; no model, Compose or TLS"}, indent=2))
         finally:
-            if created:
-                run(["rm", "-f", name])
+            cleanup_probe(run, name, run_id)
 
 
 if __name__ == "__main__":

@@ -63,3 +63,16 @@ test('Docker probe accepts only immutable local IDs and rejects implicit image p
   assert.equal(rejected.status, 1);
   assert.match(rejected.stderr, /LOCAL_IMAGE_ID_REQUIRED/);
 });
+
+test('Docker probe pins local daemon and safely cleans uncertain create outcomes', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync(
+    'python3',
+    ['-B', 'tests/harness/docker-probe-fixture.py'],
+    {
+      encoding: 'utf8',
+      timeout: 10000,
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+});
