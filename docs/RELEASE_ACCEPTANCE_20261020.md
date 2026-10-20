@@ -20,6 +20,8 @@ Docker 产品运行包来自上述 `0697ba5`，release tree SHA-256 为 `245a4a2
 
 ## 可执行复验
 
+Docker 构建与运行、实际 Codex app-server 的公开探针及完整步骤见[协议与容器复验](ACCEPTANCE_PROBES.md)。补充探针在同一本地镜像和已安装 Codex 上重跑通过；新增 3 个 harness 正反例，补充后的完整检查为 520 个应用测试与 21 个 harness。原始 18 项计数对应上表的历史验收批次。
+
 在独立 checkout 使用已安装的受支持工具：
 
 ```sh
