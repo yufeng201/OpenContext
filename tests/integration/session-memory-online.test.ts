@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createApplication } from '../../apps/server/src/app.ts';
 import { Catalog } from '../../packages/state-sqlite/src/index.ts';
@@ -707,4 +707,161 @@ it('does not retain a prior review when its binding is revoked during replacemen
   expect(state.response).toBeNull();
   expect(state.reviewHash).toBeNull();
   expect((await f.get('/review')).statusCode).toBe(409);
+});
+
+it('rolls back a new memory space when binding persistence fails, then retries without orphan spaces', async () => {
+  const f = fixture();
+  f.application.catalog.db.exec(`CREATE TEMP TRIGGER fail_memory_binding
+    BEFORE INSERT ON bindings BEGIN SELECT RAISE(ABORT, 'synthetic binding failure'); END`);
+  const failed = await f.post('sync');
+  expect(failed.statusCode).toBe(500);
+  expect(f.application.catalog.listProjects()).toHaveLength(0);
+  const initializationEvents = () =>
+    f.application.catalog.db
+      .prepare(
+        "SELECT event_json FROM (SELECT event_json FROM audit_pending UNION ALL SELECT event_json FROM audit_events) WHERE json_extract(event_json,'$.action') IN ('project.create','source.create')",
+      )
+      .all();
+  expect(initializationEvents()).toHaveLength(0);
+  f.application.catalog.db.exec('DROP TRIGGER fail_memory_binding');
+  const recovered = await f.sync();
+  expect(recovered.status).toBe('pending');
+  expect(initializationEvents()).toHaveLength(2);
+  expect(f.application.catalog.listProjects()).toHaveLength(1);
+  expect(f.application.catalog.listBindings(recovered.projectId!)).toHaveLength(
+    1,
+  );
+});
+
+it('refuses a published sync run as proof that reviewed memory was published', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  await f.post('submit', await f.response());
+  const path = resolve(f.dataRoot, 'plugin-state/session-memory/state.json');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  const sync = f.application.catalog
+    .listRuns(first.projectId!)
+    .find((run) => run.kind === 'sync')!;
+  expect(sync.state).toBe('published');
+  const damaged = JSON.stringify({
+    ...state,
+    status: 'publishing',
+    runId: sync.id,
+  });
+  writeFileSync(path, damaged);
+  await f.restart();
+  const result = await f.get();
+  expect(result.statusCode).toBe(500);
+  expect(result.json().error.code).toBe('CHECKPOINT_CORRUPT');
+  expect(readFileSync(path, 'utf8')).toBe(damaged);
+  expect(
+    f.application.catalog
+      .currentFiles(first.projectId!)
+      .filter((file) => file.collection === 'derived'),
+  ).toHaveLength(0);
+});
+
+it('survives process death between space and binding inserts without partial initialization', async () => {
+  const f = fixture();
+  await f.application.app.close();
+  const script = resolve(f.root, 'crash-initialization.mjs');
+  writeFileSync(
+    script,
+    `
+    const {createApplication}=await import(${JSON.stringify(new URL('../../apps/server/src/app.ts', import.meta.url).href)});
+    const a=createApplication(${JSON.stringify({ dataRoot: f.dataRoot, ownerToken: owner, autoStart: false, sessionMemory: f.sessionMemory })});
+    a.catalog.db.function('synthetic_crash',()=>{process.kill(process.pid,'SIGKILL');return 1;});
+    a.catalog.db.exec("CREATE TEMP TRIGGER crash_binding BEFORE INSERT ON bindings BEGIN SELECT synthetic_crash(); END");
+    await a.app.inject({method:'POST',url:'/api/session-memory/sync',headers:${JSON.stringify(headers)},payload:{}});
+  `,
+  );
+  expect(() =>
+    execFileSync(process.execPath, [script], {
+      timeout: 10000,
+      stdio: 'pipe',
+      env: { PATH: process.env['PATH'] ?? '' },
+    }),
+  ).toThrow(expect.objectContaining({ signal: 'SIGKILL' }));
+  await f.restart();
+  expect(f.application.catalog.listProjects()).toHaveLength(0);
+  const status = await f.sync();
+  expect(status.status).toBe('pending');
+  expect(f.application.catalog.listProjects()).toHaveLength(1);
+});
+
+it.each(['input', 'task', 'response'] as const)(
+  'rejects a mismatched %s checkpoint during publication recovery',
+  async (mismatch) => {
+    const f = fixture();
+    const first = await f.sync();
+    const review = (await f.post('submit', await f.response())).json();
+    expect(
+      (
+        await f.post('approve', {
+          taskId: first.taskId,
+          reviewHash: review.reviewHash,
+        })
+      ).statusCode,
+    ).toBe(200);
+    const head = f.application.catalog.head(first.projectId!);
+    const runs = f.application.catalog.listRuns(first.projectId!);
+    const path = resolve(f.dataRoot, 'plugin-state/session-memory/state.json');
+    const state = JSON.parse(readFileSync(path, 'utf8'));
+    state.status = 'publishing';
+    state.processedVersion = null;
+    if (mismatch === 'input')
+      state.task.inputCommitId = 'synthetic-unrelated-commit';
+    if (mismatch === 'task')
+      state.task.bindingId = 'synthetic-unrelated-binding';
+    if (mismatch === 'response')
+      state.response.taskId = 'synthetic-unrelated-task';
+    const damaged = JSON.stringify(state);
+    writeFileSync(path, damaged);
+    await f.restart();
+    const result = await f.get();
+    expect(result.statusCode).toBe(500);
+    expect(result.json().error.code).toBe('CHECKPOINT_CORRUPT');
+    expect(readFileSync(path, 'utf8')).toBe(damaged);
+    expect(f.application.catalog.head(first.projectId!)).toBe(head);
+    expect(f.application.catalog.listRuns(first.projectId!)).toHaveLength(
+      runs.length,
+    );
+  },
+);
+
+it('status polling recovers a committed publication exactly once and clears obsolete errors', async () => {
+  const f = fixture();
+  const first = await f.sync();
+  const review = (await f.post('submit', await f.response())).json();
+  const approval = { taskId: first.taskId, reviewHash: review.reviewHash };
+  expect((await f.post('approve', approval)).statusCode).toBe(200);
+  const head = f.application.catalog.head(first.projectId!);
+  const path = resolve(f.dataRoot, 'plugin-state/session-memory/state.json');
+  const state = JSON.parse(readFileSync(path, 'utf8'));
+  writeFileSync(
+    path,
+    JSON.stringify({
+      ...state,
+      status: 'publishing',
+      processedVersion: null,
+      error: 'PROCESSING_FAILED',
+    }),
+  );
+  await f.restart();
+  for (let i = 0; i < 3; i++) {
+    const status = await f.get();
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toMatchObject({
+      status: 'published',
+      processedVersion: state.taskVersion,
+      error: null,
+    });
+  }
+  expect((await f.post('approve', approval)).statusCode).toBe(200);
+  expect(f.application.catalog.head(first.projectId!)).toBe(head);
+  expect(
+    f.application.catalog
+      .listRuns(first.projectId!)
+      .filter((run) => run.kind === 'process'),
+  ).toHaveLength(1);
 });

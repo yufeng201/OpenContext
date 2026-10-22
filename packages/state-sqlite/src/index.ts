@@ -389,20 +389,22 @@ export class Catalog {
   }
 
   createProject(name: string, audit?: AuditContext): Project {
-    return this.transaction(() => {
-      this.assertAuthority();
-      const project: Project = {
-        id: randomUUID(),
-        name,
-        head: null,
-        createdAt: new Date().toISOString(),
-      };
-      this.db
-        .prepare('INSERT INTO projects(id,name,created_at) VALUES(?,?,?)')
-        .run(project.id, name, project.createdAt);
-      this.criticalAudit('project.create', { projectId: project.id }, audit);
-      return project;
-    });
+    return this.transaction(() => this.insertProject(name, audit));
+  }
+
+  private insertProject(name: string, audit?: AuditContext): Project {
+    this.assertAuthority();
+    const project: Project = {
+      id: randomUUID(),
+      name,
+      head: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare('INSERT INTO projects(id,name,created_at) VALUES(?,?,?)')
+      .run(project.id, name, project.createdAt);
+    this.criticalAudit('project.create', { projectId: project.id }, audit);
+    return project;
   }
 
   listProjects(): Project[] {
@@ -431,28 +433,46 @@ export class Catalog {
     input: PreparedBinding,
     audit?: AuditContext,
   ): Binding {
+    return this.transaction(() => this.insertBinding(projectId, input, audit));
+  }
+
+  /** Keep the new space, source and their critical audit events in one commit. */
+  createProjectWithBinding(
+    name: string,
+    input: PreparedBinding,
+    audit?: AuditContext,
+  ): Binding {
     return this.transaction(() => {
-      this.assertAuthority();
-      if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
-      const prepared = checkedBinding(input);
-      const id = randomUUID();
-      this.db
-        .prepare(
-          'INSERT INTO bindings(id,project_id,name,instance_ref,package_ref,config_json,connector_json,processor_json) VALUES(?,?,?,?,?,?,?,?)',
-        )
-        .run(
-          id,
-          projectId,
-          prepared.name,
-          prepared.connector.ref,
-          prepared.connector.packageRef,
-          JSON.stringify(prepared.connector.config),
-          JSON.stringify(prepared.connector),
-          JSON.stringify(prepared.processor),
-        );
-      this.criticalAudit('source.create', { projectId, bindingId: id }, audit);
-      return this.getBinding(id)!;
+      const project = this.insertProject(name, audit);
+      return this.insertBinding(project.id, input, audit);
     });
+  }
+
+  private insertBinding(
+    projectId: string,
+    input: PreparedBinding,
+    audit?: AuditContext,
+  ): Binding {
+    this.assertAuthority();
+    if (!this.getProject(projectId)) throw new Error('NOT_FOUND');
+    const prepared = checkedBinding(input);
+    const id = randomUUID();
+    this.db
+      .prepare(
+        'INSERT INTO bindings(id,project_id,name,instance_ref,package_ref,config_json,connector_json,processor_json) VALUES(?,?,?,?,?,?,?,?)',
+      )
+      .run(
+        id,
+        projectId,
+        prepared.name,
+        prepared.connector.ref,
+        prepared.connector.packageRef,
+        JSON.stringify(prepared.connector.config),
+        JSON.stringify(prepared.connector),
+        JSON.stringify(prepared.processor),
+      );
+    this.criticalAudit('source.create', { projectId, bindingId: id }, audit);
+    return this.getBinding(id)!;
   }
 
   /** Composition-root resolver is synchronous and must perform no network I/O. */
