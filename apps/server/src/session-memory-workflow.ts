@@ -298,12 +298,8 @@ export async function sessionMemory(
         )
           throw new Error('CHECKPOINT_CORRUPT');
         if (!binding) {
-          const project = catalog.createProject(
+          binding = catalog.createProjectWithBinding(
             'Local session memory',
-            host?.audit,
-          );
-          binding = catalog.createBinding(
-            project.id,
             {
               name: 'Selected Codex exports',
               connector: await registry.prepare(
@@ -372,8 +368,26 @@ export async function sessionMemory(
       if (state.status === 'publishing') {
         const run = state.runId ? catalog.getRun(state.runId) : null;
         if (run?.state === 'published') {
+          // A durable sync or another task's process is not proof of this publication.
+          if (
+            run.kind !== 'process' ||
+            run.projectId !== state.projectId ||
+            run.bindingId !== state.bindingId ||
+            !run.resultCommit ||
+            !state.task ||
+            state.task.projectId !== state.projectId ||
+            state.task.bindingId !== state.bindingId ||
+            run.inputCommit !== state.task.inputCommitId ||
+            !state.taskVersion ||
+            !state.response ||
+            !state.reviewHash ||
+            state.response.taskId !== state.task.taskId ||
+            state.response.inputHash !== state.task.inputHash
+          )
+            throw new Error('CHECKPOINT_CORRUPT');
           state.status = 'published';
           state.processedVersion = state.taskVersion;
+          state.error = null;
         } else {
           state.status = 'failed';
           state.error = 'PROCESSING_FAILED';
